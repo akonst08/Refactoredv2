@@ -1,14 +1,17 @@
 import carla
 import time
 
+# Connect to CARLA simulator server
 def connect_client(host="localhost", port=2000, timeout=10.0):
-    client = carla.Client(host, port)
+    client = carla.Client(host, port, worker_threads=4)
     client.set_timeout(timeout)
     return client
 
+# Remove any leftover actors from previous runs
 def destroy_leftovers(world, client):
     actors = world.get_actors()
     kill = []
+    # Collect all actors to destroy (walkers, sensors, vehicles)
     kill += [a.id for a in actors.filter('controller.ai.walker')]
     kill += [a.id for a in actors.filter('walker.pedestrian.*')]
     kill += [a.id for a in actors.filter('sensor.*')]
@@ -28,16 +31,20 @@ def destroy_leftovers(world, client):
             pass
         print(f"Pre-run Destroyed {destroyed} leftover actors.")
 
+# Enable synchronous mode for deterministic simulation
 def setup_synchronous_mode(world, fixed_delta_seconds=0.05):
     settings = world.get_settings()
     settings.synchronous_mode = True
+    settings.no_rendering_mode = True
     settings.fixed_delta_seconds = fixed_delta_seconds
     world.apply_settings(settings)
     print("Synchronous mode:", world.get_settings().synchronous_mode)
 
+# Clean up all sensors and actors at the end of simulation
 def cleanup_actors(client, world, sensors):
     print("Starting cleanup...")
     
+    # Stop all sensors first
     for sensor in sensors:
         if sensor is not None:
             try:
@@ -48,6 +55,7 @@ def cleanup_actors(client, world, sensors):
     
     time.sleep(0.1)
     
+    # Get current actors in the world
     try:
         current_actors = world.get_actors()
         current_ids = {a.id for a in current_actors}
@@ -55,6 +63,7 @@ def cleanup_actors(client, world, sensors):
         current_actors = []
         current_ids = set()
     
+    # Destroy sensor actors
     for sensor in sensors:
         if sensor is not None and sensor.id in current_ids:
             try:
@@ -69,6 +78,7 @@ def cleanup_actors(client, world, sensors):
     except Exception:
         pass
     
+    # Batch destroy remaining actors (controllers, walkers, vehicles)
     destroy_cmds = []
     for a in current_actors.filter('*controller*'):
         destroy_cmds.append(carla.command.DestroyActor(a.id))
