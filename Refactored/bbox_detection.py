@@ -53,6 +53,7 @@ def finite_bbox(verts, W, H):
     if not (np.all(np.isfinite(xs)) and np.all(np.isfinite(ys))):
         return None
     # Clip bounding box to image dimensions
+    # np.clip ensures values are within [0, W-1] and [0, H-1]
     x_min = int(np.clip(xs.min(), 0, W - 1))
     x_max = int(np.clip(xs.max(), 0, W - 1))
     y_min = int(np.clip(ys.min(), 0, H - 1))
