@@ -2,14 +2,13 @@ import argparse
 import os
 import shutil
 import carla
+import yaml
 
-# Parse command-line arguments for camera FOV, capture duration, and spawn point
-def parse_args():
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--fov", type=float, default=90.0, help="Horizontal camera FOV in degrees")
-    parser.add_argument("--duration", type=float, default=25.0, help="Capture duration in seconds")
-    parser.add_argument("--cam-index", type=int, default=0, help="Spawn point index for static camera position")
-    return parser.parse_args()
+
+def load_config(path="config.yaml"):
+    with open(path, 'r') as f:
+        config = yaml.safe_load(f)
+    return config
 
 # Output directories for images, labels, videos, and annotations
 OUT_ROOT = "out"
