@@ -54,20 +54,56 @@ weather_presets = [
     carla.WeatherParameters.DustStorm
 ]
 
-# Semantic segmentation BGR colors for each object class
+# Semantic segmentation BGR colors for each dynamic actor class
 SEG_COLORS = {
-    12: [(60,20,220)],
-    13: [(0,0,255)],
-    14: [(142,0,0)],
-    15: [(70,0,0)],
-    16: [(100,60,0)],
-    17: [(100,80,0)],
-    18: [(230,0,0)],
-    19: [(32,11,119)]
+    12: [(60, 20, 220)],
+    13: [(0, 0, 255)],
+    14: [(142, 0, 0)],
+    15: [(70, 0, 0)],
+    16: [(100, 60, 0)],
+    17: [(100, 80, 0)],
+    18: [(230, 0, 0)],
+    19: [(32, 11, 119)]
+}
+
+# CityScapes palette colors (BGR) mapped to desired class IDs
+SEG_CLASS_COLORS_BGR = {
+    # Static objects
+    1: (128, 64, 128),   # road
+    2: (232, 35, 244),   # sidewalk
+    3: (70, 70, 70),     # building
+    4: (156, 102, 102),  # wall
+    5: (153, 153, 190),  # fence
+    6: (153, 153, 153),  # pole
+    7: (0, 220, 250),    # traffic light
+    8: (0, 220, 220),    # traffic sign
+    9: (35, 142, 107),   # vegetation
+    10: (152, 251, 152), # terrain
+    11: (180, 130, 70),  # sky
+    # Dynamic actors
+    12: (60, 20, 220),   # pedestrian
+    13: (0, 0, 255),     # rider
+    14: (142, 0, 0),     # car
+    15: (70, 0, 0),      # truck
+    16: (100, 60, 0),    # bus
+    17: (100, 80, 0),    # train
+    18: (230, 0, 0),     # motorcycle
+    19: (32, 11, 119)    # bicycle
 }
 
 # Class ID to human-readable name mapping
 CLASS_NAMES = {
+    1: "road",
+    2: "sidewalk",
+    3: "building",
+    4: "wall",
+    5: "fence",
+    6: "pole",
+    7: "traffic light",
+    8: "traffic sign",
+    9: "vegetation",
+    10: "terrain",
+    11: "sky",
     12: "pedestrian",
     13: "rider",
     14: "car",

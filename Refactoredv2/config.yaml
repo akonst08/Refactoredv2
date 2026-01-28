@@ -18,7 +18,7 @@ run:
   cam_index: 50
 
 traffic:
-  vehicles: 30
+  vehicles: 10
   walkers: 0
 
 processing:

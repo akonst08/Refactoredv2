@@ -93,10 +93,13 @@ def filter_boxes_segmentation(boxes, seg_img, bg_thr=0.60):
         return []
     
     seg_bgr = seg_img[:, :, :3]
+    
+    # Pre-compute background mask for entire image once
+    # Create a lookup by converting RGB to a single integer for fast comparison
+    bg_set = set(tuple(color) for color in BACKGROUND_COLORS)
+    
     keep = []
     
-    # Filter boxes based on background ratio within each bounding box
-
     for (xmin, ymin, xmax, ymax, cid) in boxes:
         # Ensure box is within image bounds
         xmin = max(0, xmin)
@@ -107,21 +110,60 @@ def filter_boxes_segmentation(boxes, seg_img, bg_thr=0.60):
         if xmax <= xmin or ymax <= ymin:
             continue
         
-        # Extract region of interest and compute background ratio
+        # Extract region of interest
         roi = seg_bgr[ymin:ymax, xmin:xmax]
         
         total_pixels = roi.shape[0] * roi.shape[1]
         if total_pixels == 0:
             continue
 
-        bg_pixels = 0
-        for color in BACKGROUND_COLORS:
-            bg_pixels += np.all(roi == color, axis=-1).sum()
+        # Reshape ROI to 2D array of pixels (N x 3)
+        roi_reshaped = roi.reshape(-1, 3)
+        
+        # Vectorized comparison: check if each pixel matches any background color
+        # Broadcasting: (N, 3) vs (21, 3) -> (N, 21, 3)
+        matches = (roi_reshaped[:, None, :] == BACKGROUND_COLORS[None, :, :]).all(axis=2)
+        bg_pixels = matches.any(axis=1).sum()
         
         bg_ratio = bg_pixels / total_pixels
-        # Keep box if background ratio is below threshold
+        
         if bg_ratio < bg_thr:
             keep.append((xmin, ymin, xmax, ymax, cid))
 
     return keep
 
+
+def color_mask_to_class_ids(seg_bgr, color_map_bgr):
+    class_mask = np.zeros(seg_bgr.shape[:2], dtype=np.uint8)
+    for cid, bgr in color_map_bgr.items():
+        match = (seg_bgr == bgr).all(axis=2)
+        class_mask[match] = cid
+    return class_mask
+
+
+def build_color_lut(color_map_bgr, default=0):
+    # 256^3 Look up table: lut[b, g, r] -> class id
+    lut = np.zeros((256, 256, 256), dtype=np.uint8)
+    if default:
+        lut.fill(default)
+    for cid, bgr in color_map_bgr.items():
+        b, g, r = bgr
+        lut[b, g, r] = cid
+    return lut
+
+
+def apply_color_lut(seg_bgr, lut):
+    return lut[seg_bgr[:, :, 0], seg_bgr[:, :, 1], seg_bgr[:, :, 2]]
+
+
+def build_id_to_color_lut(color_map_bgr, default=(0, 0, 0)):
+    # 0..255 class id -> BGR color
+    lut = np.zeros((256, 3), dtype=np.uint8)
+    lut[:] = default
+    for cid, bgr in color_map_bgr.items():
+        lut[cid] = bgr
+    return lut
+
+
+def apply_id_to_color(class_mask, id_to_color_lut):
+    return id_to_color_lut[class_mask]

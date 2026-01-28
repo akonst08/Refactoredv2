@@ -10,6 +10,9 @@ def cam_callback(image, data_dict):
 
 # Callback to process semantic segmentation images
 def seg_callback(image, data_dict):
+    # Capture raw class IDs before converting to a color palette
+    arr_raw = np.frombuffer(image.raw_data, dtype=np.uint8).reshape((image.height, image.width, 4))
+    data_dict['labels'] = arr_raw[:, :, 2].copy()
     # Apply CityScapes color palette for semantic classes
     image.convert(carla.ColorConverter.CityScapesPalette)
     arr = np.frombuffer(image.raw_data, dtype=np.uint8)
@@ -34,7 +37,11 @@ def create_cameras(world, bp_lib, cam_trans, fov, image_w, image_h):
     
     # Initialize data storage for both cameras
     camera_data = {'image': np.zeros((image_h, image_w, 4), dtype=np.uint8), 'frame': -1}
-    segmentation_data = {'image': np.zeros((image_h, image_w, 4), dtype=np.uint8), 'frame': -1}
+    segmentation_data = {
+        'image': np.zeros((image_h, image_w, 4), dtype=np.uint8),
+        'labels': np.zeros((image_h, image_w), dtype=np.uint8),
+        'frame': -1
+    }
     
     # Register callbacks to capture images
     camera.listen(lambda image: cam_callback(image, camera_data))

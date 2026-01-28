@@ -72,6 +72,11 @@ segmentation_writer = None
 # Build camera intrinsic matrix for 3D to 2D projection
 K = bbox_detection.build_projection_matrix(image_w, image_h, cfg["camera"]["fov"])
 
+# Precompute LUT for fast color->class mapping
+COLOR_LUT = bbox_detection.build_color_lut(bbox_config.SEG_CLASS_COLORS_BGR)
+# Precompute LUT for fast class->color mapping (debug preview)
+ID_TO_COLOR_LUT = bbox_detection.build_id_to_color_lut(bbox_config.SEG_CLASS_COLORS_BGR)
+
 #  TRAFFIC SPAWNING 
 # Spawn vehicles with autopilot for dynamic scene
 vehicle_bps = bp_lib.filter('*vehicle*')
@@ -120,6 +125,7 @@ EXPORT_START_FRAME = cfg["export"]["export_start_frame"]
 EXPORT_END_PERCENT = cfg["export"]["export_end_percent"]
 # Maximum number of frames to export
 MAX_EXPORTS = cfg["export"]["max_exports"]
+
 
 
 #  STATE TRACKING VARIABLES 
@@ -212,7 +218,14 @@ try:
             if mm:
                 x_min, x_max, y_min, y_max = mm
                 boxes_xyxy_cls.append((x_min, y_min, x_max, y_max, cid))
-        
+
+        # REMOVE ghost / occluded bounding boxes using semantic segmentation
+        boxes_xyxy_cls = bbox_detection.filter_boxes_segmentation(
+            boxes_xyxy_cls,
+            seg_img,
+            bg_thr=0.40
+        )
+
         #  EXPORT DECISION 
         # Determine if this frame should be exported based on settings
         is_export_frame = (ENABLE_EXPORTS and 
@@ -241,9 +254,21 @@ try:
                 cv2.rectangle(overlay, (x1, y1), (x2, y2), color, 1)
             cv2.imwrite(boxed_path, overlay)
 
-            # 3) Export segmentation mask
+            # 3) Export segmentation mask (color)
             seg_path = os.path.join(bbox_config.IMG_SEG_DIR, f"frame_{frame_id}_seg.png")
             cv2.imwrite(seg_path, seg_bgr)
+
+            # 4) Export class-id mask (single-channel, class per pixel)
+            class_mask = bbox_detection.apply_color_lut(seg_bgr, COLOR_LUT)
+            mask_path = os.path.join(bbox_config.IMG_DETMASK_DIR, f"frame_{frame_id}_mask.png")
+            cv2.imwrite(mask_path, class_mask)
+
+            # 4b) Debug: unique IDs and re-colored preview to compare with seg image
+            unique_ids = np.unique(class_mask)
+            print(f"[MASK DEBUG] Frame {frame_count} unique IDs: {unique_ids.tolist()}")
+            mask_color = bbox_detection.apply_id_to_color(class_mask, ID_TO_COLOR_LUT)
+            mask_dbg_path = os.path.join(bbox_config.IMG_DETMASK_DIR, f"frame_{frame_id}_mask_dbg.png")
+            cv2.imwrite(mask_dbg_path, mask_color)
 
 
             # 5) Export bounding box annotations in Pascal VOC XML format
