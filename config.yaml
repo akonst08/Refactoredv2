@@ -14,7 +14,7 @@ camera:
   pitch: -90.0
 
 run:
-  duration: 10
+  duration: 20
   cam_index: 25
 
 traffic:

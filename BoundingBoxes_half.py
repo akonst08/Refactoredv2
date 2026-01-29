@@ -8,7 +8,6 @@ import cv2
 import os
 import time as time_module
 
-#  MODULE IMPORTS 
 # Import refactored modules for configuration, CARLA management, 
 # camera handling, detection algorithms, and label export
 import bbox_config
@@ -16,6 +15,21 @@ import bbox_carla
 import bbox_camera
 import bbox_detection
 import bbox_labels
+
+
+STATIC_CLASS_IDS = set(range(12, 20))  # 12–19 inclusive
+
+ID_TO_NAME = {
+    12: "pedestrian",
+    13: "rider",
+    14: "car",
+    15: "truck",
+    16: "bus",
+    17: "train",
+    18: "motorcycle",
+    19: "bicycle",
+}
+
 
 #  INITIALIZATION 
 cfg = bbox_config.load_config("config.yaml")
@@ -73,21 +87,21 @@ segmentation_writer = None
 K = bbox_detection.build_projection_matrix(image_w, image_h, cfg["camera"]["fov"])
 
 #  TRAFFIC SPAWNING 
-# Spawn vehicles with autopilot for dynamic scene
-# vehicle_bps = bp_lib.filter('*vehicle*')
-# for _ in range(cfg["traffic"]["vehicles"]):
-#     sp = random.choice(world.get_map().get_spawn_points())
-#     vbp = random.choice(vehicle_bps)
-#     spawned_vehicle = world.try_spawn_actor(vbp, sp)
-#     if spawned_vehicle:
-#         spawned_vehicle.set_autopilot(True)
-#                 # DEBUG: print semantic class IDs
-#         print(
-#             "[SPAWNED]",
-#             spawned_vehicle.type_id,
-#             "semantic_tags =",
-#             spawned_vehicle.semantic_tags
-#         )
+#Spawn vehicles with autopilot for dynamic scene
+vehicle_bps = bp_lib.filter('*vehicle*')
+for _ in range(cfg["traffic"]["vehicles"]):
+    sp = random.choice(world.get_map().get_spawn_points())
+    vbp = random.choice(vehicle_bps)
+    spawned_vehicle = world.try_spawn_actor(vbp, sp)
+    if spawned_vehicle:
+        spawned_vehicle.set_autopilot(True)
+                # DEBUG: print semantic class IDs
+        print(
+            "[SPAWNED]",
+            spawned_vehicle.type_id,
+            "semantic_tags =",
+            spawned_vehicle.semantic_tags
+        )
 
 # Spawn pedestrian walkers with AI controllers for realistic movement
 walker_bps = bp_lib.filter('*walker*')
@@ -249,12 +263,12 @@ try:
 
             # 2) Export RGB frame WITH bounding boxes (BOXED IMAGE)
             boxed_path = os.path.join(bbox_config.IMG_BOXED_DIR, f"frame_{frame_id}_boxed.png")
-            overlay = img_bgr.copy()
-            for (x1, y1, x2, y2, cid) in boxes_xyxy_cls:
-                # Green for vehicles/riders/etc, blue for others
-                color = (0, 255, 0) if cid in [13,14,15,16,17,18,19] else (255, 0, 0)
-                cv2.rectangle(overlay, (x1, y1), (x2, y2), color, 1)
-            cv2.imwrite(boxed_path, overlay)
+            # overlay = img_bgr.copy()
+            # for (x1, y1, x2, y2, cid) in boxes_xyxy_cls:
+            #     # Green for vehicles/riders/etc, blue for others
+            #     color = (0, 255, 0) if cid in [13,14,15,16,17,18,19] else (255, 0, 0)
+            #     cv2.rectangle(overlay, (x1, y1), (x2, y2), color, 1)
+            # cv2.imwrite(boxed_path, overlay)
 
             # 3) Export segmentation mask
             seg_path = os.path.join(bbox_config.IMG_SEG_DIR, f"frame_{frame_id}_seg.png")
@@ -272,20 +286,85 @@ try:
             )
 
             cv2.imwrite(classid_path, classid_mask)
+
             # ===== VISUAL VALIDATION: overlay class on segmentation =====
-            if export_count == 0:  # do once
-                cid = 19  # try 18 (motorcycle), 19 (bicycle), 14 (car), 25 (rider)
+            # if export_count == 0:  # do once
+            #     cid = 19  # try 18 (motorcycle), 19 (bicycle), 14 (car), 25 (rider)
 
-                overlay = seg_bgr.copy()
+            #     overlay = seg_bgr.copy()
 
-                mask = (classid_mask == cid)
-                overlay[mask] = (0, 255, 255)  # bright yellow overlay
+            #     mask = (classid_mask == cid)
+            #     overlay[mask] = (0, 255, 255)  # bright yellow overlay
 
-                cv2.imwrite(
-                    os.path.join(bbox_config.IMG_DETMASK_DIR,
-                                f"frame_{frame_id}_overlay_id{cid}.png"),
-                    overlay
+            #     cv2.imwrite(
+            #         os.path.join(bbox_config.IMG_DETMASK_DIR,
+            #                     f"frame_{frame_id}_overlay_id{cid}.png"),
+            #         overlay
+            #     )
+
+            # if export_count < 10:
+            #     CAR_ID = 14  # car in your palette
+
+            #     # isolate all car pixels from segmentation
+            #     car_pixels = np.zeros_like(seg_bgr)
+            #     car_pixels[classid_mask == CAR_ID] = seg_bgr[classid_mask == CAR_ID]
+
+            #     cv2.imwrite(
+            #         os.path.join(
+            #             bbox_config.IMG_DETMASK_DIR,
+            #             f"frame_{frame_id}_cars_only.png"
+            #         ),
+            #         car_pixels
+            #     )
+
+            # Collect dynamic boxes to avoid duplicates
+            dynamic_boxes = [
+                (xmin, ymin, xmax, ymax)
+                for (xmin, ymin, xmax, ymax, _) in boxes_xyxy_cls
+            ]
+            # ===========================================================
+            # ADD STATIC / PARKED ACTORS FROM SEMANTIC MASK (12–19)
+            # ===========================================================
+            
+            static_classid_mask = classid_mask.copy()
+
+            for (xmin, ymin, xmax, ymax) in dynamic_boxes:
+                static_classid_mask[ymin:ymax, xmin:xmax] = 0
+
+            for cid in STATIC_CLASS_IDS:
+                static_boxes = bbox_detection.extract_static_boxes(static_classid_mask, cid)
+
+                # Create boxes in the correct format to be used by the filter
+                static_boxes_xyxy_cls = [
+                    (xmin, ymin, xmax, ymax, ID_TO_NAME[cid])
+                    for (xmin, ymin, xmax, ymax) in static_boxes
+                    if not any(bbox_detection.iou((xmin, ymin, xmax, ymax), dbox) > 0.3 for dbox in dynamic_boxes)
+                ]
+
+                # APPLY THE SAME FILTER YOU USE FOR DYNAMIC BOXES
+                static_boxes_xyxy_cls = bbox_detection.filter_boxes_segmentation(
+                    static_boxes_xyxy_cls,
+                    seg_img,
+                    bg_thr=0.40
                 )
+
+                # now append only the visible static boxes
+                boxes_xyxy_cls.extend(static_boxes_xyxy_cls)
+
+            overlay = img_bgr.copy()
+            for (x1, y1, x2, y2, cid) in boxes_xyxy_cls:
+
+                # check if this box is dynamic
+                is_dynamic = (x1, y1, x2, y2) in dynamic_boxes
+
+                if is_dynamic:
+                    color = (0, 255, 0)   # GREEN - dynamic
+                else:
+                    color = (255, 0, 0) # BLUE - static
+
+                cv2.rectangle(overlay, (x1, y1), (x2, y2), color, 1)
+
+            cv2.imwrite(boxed_path, overlay)
         # ===========================================================
 
             # 5) Export bounding box annotations in Pascal VOC XML format
