@@ -84,7 +84,7 @@ def finite_bbox(verts, W, H, min_size=1):
 # Filter bounding boxes using segmentation image to remove false positives
 # Rejects boxes where background pixels exceed the threshold ratio
 @timeit("filter_boxes_segmentation")
-def filter_boxes_segmentation(boxes, seg_img, bg_thr=0.60):
+def filter_boxes_segmentation(boxes, seg_img, bg_thr=0.65):
     if not boxes:
         return []
     

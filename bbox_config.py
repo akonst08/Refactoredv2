@@ -17,12 +17,14 @@ IMG_RGB_DIR = os.path.join(IMG_DIR, "rgb")
 IMG_SEG_DIR = os.path.join(IMG_DIR, "seg")
 IMG_BOXED_DIR = os.path.join(IMG_DIR, "boxed")
 IMG_DETMASK_DIR = os.path.join(IMG_DIR, "detmask")
+IMG_STATIC_DEBUG_DIR = os.path.join(IMG_DIR, "static_debug")  # NEW: Debug static mask
 VID_DIR = os.path.join(OUT_ROOT, "videos")
 VOC_DIR = os.path.join(OUT_ROOT, "annotations_voc")
 
+
 # Clean and recreate output directories
 def setup_output_dirs():
-    for d in [IMG_DIR, IMG_RGB_DIR, IMG_SEG_DIR, IMG_BOXED_DIR, IMG_DETMASK_DIR, VID_DIR, VOC_DIR]:
+    for d in [IMG_DIR, IMG_RGB_DIR, IMG_SEG_DIR, IMG_BOXED_DIR, IMG_DETMASK_DIR, IMG_STATIC_DEBUG_DIR, VID_DIR, VOC_DIR]:
         if os.path.exists(d):
             shutil.rmtree(d)
         os.makedirs(d, exist_ok=True)
@@ -66,6 +68,7 @@ SEG_COLORS = {
     19: [(32, 11, 119)]
 }
 
+STATIC_CLASS_IDS = set(range(12, 20))  # 12–19 inclusive
 # Class ID to human-readable name mapping
 CLASS_NAMES = {
     1: "road",
