@@ -17,18 +17,6 @@ import bbox_detection
 import bbox_labels
 
 
-STATIC_CLASS_IDS = set(range(12, 20))  # 12–19 inclusive
-
-ID_TO_NAME = {
-    12: "pedestrian",
-    13: "rider",
-    14: "car",
-    15: "truck",
-    16: "bus",
-    17: "train",
-    18: "motorcycle",
-    19: "bicycle",
-}
 
 
 #  INITIALIZATION 
@@ -122,12 +110,12 @@ for _ in range(cfg["traffic"]["walkers"]):
             ctrl.set_max_speed(1 + random.random())
 
 # Spawn a stationary "dummy" vehicle to keep traffic manager active
-vehicle_bp = bp_lib.filter('*mini*')[0]
-dummy_sp = spawn_points[0]
-dummy_vehicle = world.try_spawn_actor(vehicle_bp, dummy_sp)
-if dummy_vehicle:
-    dummy_vehicle.set_autopilot(False)
-    dummy_vehicle.apply_control(carla.VehicleControl(throttle=0, brake=1))
+# vehicle_bp = bp_lib.filter('*mini*')[0]
+# dummy_sp = spawn_points[0]
+# dummy_vehicle = world.try_spawn_actor(vehicle_bp, dummy_sp)
+# if dummy_vehicle:
+#     dummy_vehicle.set_autopilot(False)
+#     dummy_vehicle.apply_control(carla.VehicleControl(throttle=0, brake=1))
 
 #  PERFORMANCE & EXPORT SETTINGS 
 
@@ -197,6 +185,7 @@ try:
         #  DYNAMIC ACTOR DETECTION 
         # Project 3D bounding boxes of all vehicles and walkers onto 2D image plane
         boxes_xyxy_cls = []
+        all_spawned_boxes = []  # Store ALL projected boxes (before filtering)
         actors = world.get_actors()
         
         # Detect vehicles (cars, trucks, buses, motorcycles, bicycles)
@@ -216,6 +205,8 @@ try:
             if mm:
                 x_min, x_max, y_min, y_max = mm
                 boxes_xyxy_cls.append((x_min, y_min, x_max, y_max, cid))
+                # Store BEFORE filtering - we need to erase ALL actors from static mask
+                all_spawned_boxes.append((x_min, y_min, x_max, y_max))
         
         # Detect walkers/pedestrians (riders, pedestrians)
         for a in actors.filter('*walker*'):
@@ -234,6 +225,8 @@ try:
             if mm:
                 x_min, x_max, y_min, y_max = mm
                 boxes_xyxy_cls.append((x_min, y_min, x_max, y_max, cid))
+                # Store BEFORE filtering - we need to erase ALL actors from static mask
+                all_spawned_boxes.append((x_min, y_min, x_max, y_max))
 
         # REMOVE ghost / occluded bounding boxes using semantic segmentation
         boxes_xyxy_cls = bbox_detection.filter_boxes_segmentation(
@@ -242,7 +235,9 @@ try:
             bg_thr=0.40
         )
 
-        #  EXPORT DECISION 
+        # We erase ALL spawned actors from static mask, even occluded ones
+        # This prevents dynamic vehicles from being detected as static when occluded
+
         # Determine if this frame should be exported based on settings
         is_export_frame = (ENABLE_EXPORTS and 
                           frame_count >= EXPORT_START_FRAME and 
@@ -253,6 +248,7 @@ try:
         #  FRAME EXPORT 
         # Save frame and annotations if this is an export frame
         if is_export_frame:
+            
             frame_id = f"{frame_count:06d}"
             img_bgr = img[:, :, :3]
             seg_bgr = seg_img[:, :, :3]
@@ -263,12 +259,6 @@ try:
 
             # 2) Export RGB frame WITH bounding boxes (BOXED IMAGE)
             boxed_path = os.path.join(bbox_config.IMG_BOXED_DIR, f"frame_{frame_id}_boxed.png")
-            # overlay = img_bgr.copy()
-            # for (x1, y1, x2, y2, cid) in boxes_xyxy_cls:
-            #     # Green for vehicles/riders/etc, blue for others
-            #     color = (0, 255, 0) if cid in [13,14,15,16,17,18,19] else (255, 0, 0)
-            #     cv2.rectangle(overlay, (x1, y1), (x2, y2), color, 1)
-            # cv2.imwrite(boxed_path, overlay)
 
             # 3) Export segmentation mask
             seg_path = os.path.join(bbox_config.IMG_SEG_DIR, f"frame_{frame_id}_seg.png")
@@ -280,6 +270,7 @@ try:
             if export_count > 10:   # avoid spamming
                 ids, counts = np.unique(classid_mask, return_counts=True)
                 print(dict(zip(ids, counts)))
+            
             classid_path = os.path.join(
                 bbox_config.IMG_DETMASK_DIR,
                 f"frame_{frame_id}_classid.png"
@@ -322,34 +313,65 @@ try:
                 (xmin, ymin, xmax, ymax)
                 for (xmin, ymin, xmax, ymax, _) in boxes_xyxy_cls
             ]
-            # ===========================================================
-            # ADD STATIC / PARKED ACTORS FROM SEMANTIC MASK (12–19)
-            # ===========================================================
             
+            
+            # ===========================================================
+            # CREATE STATIC-ONLY MASK: Erase all spawned actors (FAST)
+            # Reuse already-projected boxes from detection phase above
+            # ===========================================================
             static_classid_mask = classid_mask.copy()
+            static_seg_bgr = seg_bgr.copy()
+            pad = 8  # small padding to ensure full erasure
+            # Zero out all spawned actor regions (already computed above!)
+            for (x_min, y_min, x_max, y_max) in all_spawned_boxes:
+                static_classid_mask[y_min:y_max, x_min:x_max] = 0
+                static_seg_bgr[y_min:y_max, x_min:x_max] = (0, 0, 0)
+           
+            # ===========================================================
+            # DERIVE STATIC BOXES FROM CLEANED MASK
+            # Now this mask contains ONLY map objects, no spawned actors
+            # ===========================================================
 
-            for (xmin, ymin, xmax, ymax) in dynamic_boxes:
-                static_classid_mask[ymin:ymax, xmin:xmax] = 0
+            mask = static_classid_mask.copy()
 
-            for cid in STATIC_CLASS_IDS:
-                static_boxes = bbox_detection.extract_static_boxes(static_classid_mask, cid)
+            # 1) bicycles / motorcycles - use erosion to separate touching objects
+            kernel_erode = np.ones((2, 2), np.uint8)  # Small erosion to separate
+            kernel_dilate = np.ones((3, 3), np.uint8)  # Slightly larger dilation to restore size
+            for cid in (18, 19):
+                m = (mask == cid).astype(np.uint8)
+                # Erode to separate touching objects
+                m = cv2.erode(m, kernel_erode, iterations=1)
+                # Dilate to restore approximate original size
+                m = cv2.dilate(m, kernel_dilate, iterations=1)
+                # Light closing to reconnect slightly fragmented parts (not touching objects!)
+                kernel_close = np.ones((3, 3), np.uint8)
+                m = cv2.morphologyEx(m, cv2.MORPH_CLOSE, kernel_close, iterations=1)
+                mask[mask == cid] = 0  # Clear old pixels
+                mask[m == 1] = cid     # Set new pixels
 
-                # Create boxes in the correct format to be used by the filter
-                static_boxes_xyxy_cls = [
-                    (xmin, ymin, xmax, ymax, ID_TO_NAME[cid])
-                    for (xmin, ymin, xmax, ymax) in static_boxes
-                    if not any(bbox_detection.iou((xmin, ymin, xmax, ymax), dbox) > 0.3 for dbox in dynamic_boxes)
-                ]
+            # 2) cars / trucks / buses (conservative - just light cleanup)
+            kernel_car = np.ones((3, 3), np.uint8)
+            for cid in (13, 14, 15, 16, 17):  # rider, car, truck, bus, train
+                m = (mask == cid).astype(np.uint8)
+                m = cv2.morphologyEx(m, cv2.MORPH_OPEN, kernel_car, iterations=1)
+                m = cv2.morphologyEx(m, cv2.MORPH_CLOSE, kernel_car, iterations=1)
+                mask[mask == cid] = 0
+                mask[m == 1] = cid
 
-                # APPLY THE SAME FILTER YOU USE FOR DYNAMIC BOXES
-                static_boxes_xyxy_cls = bbox_detection.filter_boxes_segmentation(
-                    static_boxes_xyxy_cls,
-                    seg_img,
-                    bg_thr=0.40
+            # extract static boxes
+            for cid in bbox_config.STATIC_CLASS_IDS:
+                static_boxes = bbox_detection.extract_static_boxes(
+                    mask,
+                    cid,
+                    min_area=30 if cid in (18, 19) else 80
                 )
 
-                # now append only the visible static boxes
-                boxes_xyxy_cls.extend(static_boxes_xyxy_cls)
+                for (xmin, ymin, xmax, ymax) in static_boxes:
+                    if (xmax - xmin) < 6 or (ymax - ymin) < 6:
+                        continue
+                    
+                    boxes_xyxy_cls.append((xmin, ymin, xmax, ymax, cid))
+
 
             overlay = img_bgr.copy()
             for (x1, y1, x2, y2, cid) in boxes_xyxy_cls:
@@ -364,6 +386,8 @@ try:
 
                 cv2.rectangle(overlay, (x1, y1), (x2, y2), color, 1)
 
+            static_seg_path = os.path.join(bbox_config.IMG_STATIC_DEBUG_DIR, f"frame_{frame_id}_static_seg.png")
+            cv2.imwrite(static_seg_path, static_seg_bgr)
             cv2.imwrite(boxed_path, overlay)
         # ===========================================================
 

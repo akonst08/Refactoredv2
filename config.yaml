@@ -9,16 +9,16 @@ carla:
 camera:
   width: 1280
   height: 720
-  fov: 70
+  fov: 90
   z: 60.0
   pitch: -90.0
 
 run:
-  duration: 20
+  duration: 25
   cam_index: 25
 
 traffic:
-  vehicles: 13
+  vehicles: 15
   walkers: 0
 
 processing:
