@@ -15,7 +15,7 @@ camera:
 
 run:
   duration: 25
-  cam_index: 25
+  cam_index: 45
 
 traffic:
   vehicles: 15

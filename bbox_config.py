@@ -55,7 +55,18 @@ weather_presets = [
     carla.WeatherParameters.HardRainNight,
     carla.WeatherParameters.DustStorm
 ]
-
+# Class ID to color mapping (BGR format for OpenCV)
+CLASS_COLORS = {
+    12: (0, 255, 255),   # pedestrian -> cyan
+    13: (255, 165, 0),   # rider -> orange
+    14: (0, 255, 0),     # car -> green
+    15: (0, 128, 255),   # truck -> light orange
+    16: (128, 0, 128),   # bus -> purple
+    17: (75, 0, 130),    # train -> indigo
+    18: (0, 0, 255),     # motorcycle -> red
+    19: (255, 0, 0),     # bicycle -> blue
+}
+DEFAULT_COLOR = (200, 200, 200)  # gray fallback
 # Semantic segmentation BGR colors for each dynamic actor class
 SEG_COLORS = {
     12: [(60, 20, 220)],

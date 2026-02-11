@@ -376,14 +376,14 @@ try:
             overlay = img_bgr.copy()
             for (x1, y1, x2, y2, cid) in boxes_xyxy_cls:
 
-                # check if this box is dynamic
-                is_dynamic = (x1, y1, x2, y2) in dynamic_boxes
+                # # check if this box is dynamic
+                # is_dynamic = (x1, y1, x2, y2) in dynamic_boxes
 
-                if is_dynamic:
-                    color = (0, 255, 0)   # GREEN - dynamic
-                else:
-                    color = (255, 0, 0) # BLUE - static
-
+                # if is_dynamic:
+                #     color = (0, 255, 0)   # GREEN - dynamic
+                # else:
+                #     color = (255, 0, 0) # BLUE - static
+                color = bbox_config.CLASS_COLORS.get(cid, bbox_config.DEFAULT_COLOR)
                 cv2.rectangle(overlay, (x1, y1), (x2, y2), color, 1)
 
             static_seg_path = os.path.join(bbox_config.IMG_STATIC_DEBUG_DIR, f"frame_{frame_id}_static_seg.png")

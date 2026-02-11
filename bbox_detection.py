@@ -141,12 +141,19 @@ def extract_static_boxes(classid_mask, class_id, min_area=80):
     """
     binary = (classid_mask == class_id).astype(np.uint8) # create binary mask, because components work only with binary.
     num_labels, labels, stats, centroids = cv2.connectedComponentsWithStats(binary, connectivity=8)
+
+    image_h, image_w = classid_mask.shape
     boxes = []
     for i in range(1, num_labels):  # skip background label 0
         x, y, w, h, area = stats[i]
         if area < min_area:
             continue
-        boxes.append((int(x), int(y), int(x + w), int(y + h)))
+        # Clip coordinates to image bounds
+        xmin = max(0, int(x))
+        ymin = max(0, int(y))
+        xmax = min(image_w - 1, int(x + w))
+        ymax = min(image_h - 1, int(y + h))
+        boxes.append((xmin, ymin, xmax, ymax))
     return boxes
 
 def iou(boxA, boxB):
