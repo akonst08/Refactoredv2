@@ -1,0 +1,41 @@
+#  TRAFFIC SPAWNING 
+# Get Traffic Manager and configure for pedestrian safety
+tm = client.get_trafficmanager(8000)  # Default TM port
+tm.set_synchronous_mode(True)  # Must match world synchronous mode
+tm.set_global_distance_to_leading_vehicle(3.0)  # Safe following distance
+tm.global_percentage_speed_difference(30.0)  # Drive at speed limit (default)
+
+print("\n=== Spawning Traffic with Pedestrian Safety ===")
+
+# Spawn vehicles with Traffic Manager control
+vehicle_bps = bp_lib.filter('*vehicle*')
+spawned_vehicles = []  # Track spawned vehicles for cleanup
+
+for i in range(cfg["traffic"]["vehicles"]):
+    sp = random.choice(world.get_map().get_spawn_points())
+    vbp = random.choice(vehicle_bps)
+    spawned_vehicle = world.try_spawn_actor(vbp, sp)
+    
+    if spawned_vehicle:
+        # Enable autopilot with Traffic Manager
+        spawned_vehicle.set_autopilot(True, tm.get_port())
+        spawned_vehicles.append(spawned_vehicle)
+        
+        # CRITICAL: Configure pedestrian detection for THIS vehicle
+        tm.ignore_walkers_percentage(spawned_vehicle, 0)  # 0% = NEVER ignore walkers
+        tm.ignore_lights_percentage(spawned_vehicle, 0)   # Respect traffic lights
+        tm.ignore_signs_percentage(spawned_vehicle, 0)    # Respect stop signs
+        
+        # Make vehicles drive more safely
+        tm.vehicle_percentage_speed_difference(spawned_vehicle, 20)  # Drive 20% slower
+        tm.distance_to_leading_vehicle(spawned_vehicle, 3.0)  # Keep 3m distance
+        
+        # Optional: Make some vehicles extra cautious (30% chance)
+        if random.random() < 0.3:
+            tm.vehicle_percentage_speed_difference(spawned_vehicle, 40)  # 40% slower
+            tm.distance_to_leading_vehicle(spawned_vehicle, 5.0)  # 5m distance
+            print(f"[VEHICLE {i+1}] {spawned_vehicle.type_id} (CAUTIOUS DRIVER)")
+        else:
+            print(f"[VEHICLE {i+1}] {spawned_vehicle.type_id}")
+
+print(f"Spawned {len(spawned_vehicles)} vehicles with pedestrian detection enabled\n")
