@@ -1,0 +1,34 @@
+carla:
+  host: localhost
+  port: 2000
+  timeout: 10.0
+  synchronous: true
+  fixed_delta_seconds: 0.05
+  weather: ClearSunset
+
+camera:
+  width: 1280
+  height: 720
+  fov: 80
+  z: 60.0
+  pitch: -90.0
+
+run:
+  duration: 10
+  cam_index: 139
+
+traffic:
+  vehicles: 25
+  walkers: 0
+
+processing:
+  process_interval: 2
+  enable_static_detection: true
+
+export:
+  enable: true
+  export_interval: 5
+  export_start_frame: 30
+  export_end_percent: 0.95
+  max_exports: 1600
+
