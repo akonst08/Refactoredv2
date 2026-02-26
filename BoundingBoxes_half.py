@@ -234,6 +234,11 @@ try:
             seg_img,
             bg_thr=0.40
         )
+        # REMOVE small ghost boxes that follow/overlap a larger vehicle box
+        boxes_xyxy_cls = bbox_detection.suppress_contained_boxes(
+            boxes_xyxy_cls,
+            iou_threshold=0.6
+        )
 
         # We erase ALL spawned actors from static mask, even occluded ones
         # This prevents dynamic vehicles from being detected as static when occluded
@@ -243,7 +248,7 @@ try:
                           frame_count >= EXPORT_START_FRAME and 
                           frame_count <= EXPORT_END_FRAME and
                           frame_count % EXPORT_INTERVAL == 0 and
-                          export_count < MAX_EXPORTS) 
+                          export_count < MAX_EXPORTS and len(boxes_xyxy_cls) > 0) 
         
         #  FRAME EXPORT 
         # Save frame and annotations if this is an export frame
@@ -369,20 +374,22 @@ try:
                 for (xmin, ymin, xmax, ymax) in static_boxes:
                     if (xmax - xmin) < 6 or (ymax - ymin) < 6:
                         continue
-                    
-                    boxes_xyxy_cls.append((xmin, ymin, xmax, ymax, cid))
 
+                    # Reject boxes where the object doesn't fill enough of the bbox
+                    # This prevents poles/lines splitting one car into two boxes
+                    roi = mask[ymin:ymax, xmin:xmax]
+                    total_pixels = roi.shape[0] * roi.shape[1]
+                    if total_pixels == 0:
+                        continue
+                    visible_pixels = np.sum(roi == cid)
+                    visibility_ratio = visible_pixels / total_pixels
+                    if visibility_ratio < 0.60:
+                        continue
+
+                    boxes_xyxy_cls.append((xmin, ymin, xmax, ymax, cid))
 
             overlay = img_bgr.copy()
             for (x1, y1, x2, y2, cid) in boxes_xyxy_cls:
-
-                # # check if this box is dynamic
-                # is_dynamic = (x1, y1, x2, y2) in dynamic_boxes
-
-                # if is_dynamic:
-                #     color = (0, 255, 0)   # GREEN - dynamic
-                # else:
-                #     color = (255, 0, 0) # BLUE - static
                 color = bbox_config.CLASS_COLORS.get(cid, bbox_config.DEFAULT_COLOR)
                 cv2.rectangle(overlay, (x1, y1), (x2, y2), color, 1)
 

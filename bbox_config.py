@@ -102,3 +102,4 @@ CLASS_NAMES = {
     18: "motorcycle",
     19: "bicycle"
 }
+

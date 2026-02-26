@@ -197,3 +197,52 @@ def iou(boxA, boxB):
 
     # Return IoU, handling division by zero
     return inter / union if union > 0 else 0.0
+
+def suppress_contained_boxes(boxes, iou_threshold=0.6):
+    """
+    Remove small boxes that are mostly contained inside a larger box.
+    Fixes the 'ghost small box following a vehicle' issue.
+    
+    Args:
+        boxes: list of (x1, y1, x2, y2, cid)
+        iou_threshold: if a box overlaps this much with a larger box, remove it
+    Returns:
+        filtered list of boxes
+    """
+    if len(boxes) == 0:
+        return boxes
+
+    # Sort by area descending (largest first)
+    boxes_sorted = sorted(boxes, key=lambda b: (b[2]-b[0]) * (b[3]-b[1]), reverse=True)
+    keep = []
+
+    for i, box_a in enumerate(boxes_sorted):
+        x1a, y1a, x2a, y2a, cid_a = box_a
+        area_a = (x2a - x1a) * (y2a - y1a)
+        suppressed = False
+
+        for box_b in keep:
+            x1b, y1b, x2b, y2b, cid_b = box_b
+            area_b = (x2b - x1b) * (y2b - y1b)
+
+            # Compute intersection
+            ix1 = max(x1a, x1b)
+            iy1 = max(y1a, y1b)
+            ix2 = min(x2a, x2b)
+            iy2 = min(y2a, y2b)
+
+            if ix2 <= ix1 or iy2 <= iy1:
+                continue  # No overlap
+
+            inter_area = (ix2 - ix1) * (iy2 - iy1)
+
+            # If small box is mostly inside the larger box → suppress it
+            overlap_ratio = inter_area / area_a if area_a > 0 else 0
+            if overlap_ratio > iou_threshold:
+                suppressed = True
+                break
+
+        if not suppressed:
+            keep.append(box_a)
+
+    return keep
