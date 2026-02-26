@@ -19,7 +19,7 @@ import bbox_labels
 import bbox_camera_specs
 
 
-# ── Background I/O helpers ──────────────────────────────────────────
+# Background I/O helpers 
 io_executor = concurrent.futures.ThreadPoolExecutor(max_workers=4)
 
 def _write_image(path, img):
@@ -29,7 +29,7 @@ def _write_image(path, img):
 def _write_xml(path, boxes, w, h, img_path, class_names):
     """Write a VOC XML file to disk (runs in background thread)."""
     bbox_labels.write_voc_xml(path, boxes, w, h, img_path, class_names)
-# ────────────────────────────────────────────────────────────────────
+# 
 
 
 #  INITIALIZATION 

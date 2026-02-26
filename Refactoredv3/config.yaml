@@ -10,7 +10,7 @@ camera:
   width: 1280
   height: 720
   fov: 80
-  z: 60.0
+  z: 55.0
   pitch: -90.0
 
 run:

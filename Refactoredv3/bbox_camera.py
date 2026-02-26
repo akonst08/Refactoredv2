@@ -1,6 +1,7 @@
 import carla
 import numpy as np
 import math
+
 # Callback to process RGB camera images
 def cam_callback(image, data_dict):
     # Convert raw image data to numpy array (BGRA format)
@@ -71,8 +72,7 @@ def spawn_three_cameras_at_spawn_point(world, bp_lib, spawn_point, cfg, spacing=
     Returns:
         List of camera_sets: [(camera, seg_cam, cam_data, seg_data, cam_bp, seg_bp), ...]
     """
-    import math
-    import numpy as np
+
     
     # Get the road waypoint at spawn point
     carla_map = world.get_map()
