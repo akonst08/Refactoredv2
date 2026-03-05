@@ -1,115 +1,138 @@
+# CARLA 0.9.15 — Scene Configuration & Camera Setup
 
 ---
 
-## File Descriptions
+## Configuration — `config.yaml`
 
-### `rgb/` - RGB Frames
-Raw RGB images captured from the camera. 
+Every scene parameter is controlled from a single file.
 
-### `seg/` - Color-Coded Segmentation
-Color visualization of semantic segmentation using the CityScapes palette. Each pixel is colored according to its semantic class (see color table below). 
+```yaml
+carla:
+  host: localhost            # CARLA server IP — keep localhost if running on same machine
+  port: 2000                 # Default CARLA port - do not change
+  timeout: 10.0              # Seconds to wait for server connection
+  synchronous: true          # Deterministic frame-by-frame control 
+  fixed_delta_seconds: 0.05  # Simulation timestep  20 FPS
+  weather: ClearSunset       # Starting weather preset (see Weather section below)
 
-### `detmask/` - Class ID Segmentation
-Grayscale semantic segmentation masks where each pixel intensity represents the class ID (0-29). Pixel value directly corresponds to class ID in the table below.
+camera:
+  width: 1280                # Output image width in pixels
+  height: 720                # Output image height in pixels
+  fov: 80                    # Field of view in degrees
+  z: 50.0                    # Camera height above ground in metres
+  pitch: -90.0               # -90 = straight down (bird's eye)
 
-### `annotations_voc/` - Bounding Box Annotations
-- Pascal VOC XML format
-- Contains bounding boxes only for classes 12-19
-- **Note:** Every frame has a corresponding XML file, even if no objects are detected. Frames without objects contain an empty annotation with only size information (see example below)
+run:
+  duration: 250               #  Simulation length in seconds
+  cam_index: 45              #  Which spawn point to centre the camera over (Initially)
 
-- Coordinates: `<xmin>`, `<ymin>`, `<xmax>`, `<ymax>` (pixels, 0-indexed)
-- All coordinates clipped to image bounds: 0 ≤ x < 1280, 0 ≤ y < 720
+traffic:
+  vehicles: 15               # NPC vehicles spawned with autopilot (Set in the pipeline)
+  walkers: 10                # Pedestrian walkers spawned with AI controllers
 
----
-**Example VOC XML without objects:**
-```xml
-<annotation>
-  <folder>out/images/rgb</folder>
-  <filename>frame_000208.png</filename>
-  <size>
-    <width>1280</width>
-    <height>720</height>
-    <depth>3</depth>
-  </size>
-</annotation>
+processing:
+  process_interval: 2        # Process every Nth tick
+  enable_static_detection: true  # Detect map-embedded parked vehicles
+
+export:
+  enable: true               # Master switch for saving frames
+  export_interval: 4         # Save every Nth processed frame
+  export_start_frame: 30     # Skip first N frames — lets traffic settle
+  export_end_percent: 0.95   # Stop at 95% of run duration
+  spawn_change_interval: 8   # Move camera every N exported frames
+  weather_change_interval: 4 # Change weather every N exported frames
+  max_exports: 1300           # Hard cap on total exported frames
 ```
-## Semantic Segmentation Classes
 
-All 30 classes (0-29) are present in both `seg/` and `detmask/` folders. The table below shows the complete CityScapes palette used in this dataset.
+## Camera Placement — `cam_index`
 
-### Complete Color Palette
+The camera is placed at the **XY coordinates of a road spawn point**, elevated to
+`z` metres above ground with `pitch = -90` (straight down bird's eye view).
 
-| ID | Class Name | RGB Color | Category |
-|----|------------|-----------|----------|
-| 0 | Unlabeled | (0, 0, 0) | Background |
-| 1 | Road | (128, 64, 128) | Infrastructure |
-| 2 | Sidewalk | (244, 35, 232) | Infrastructure |
-| 3 | Building | (70, 70, 70) | Infrastructure |
-| 4 | Wall | (102, 102, 156) | Infrastructure |
-| 5 | Fence | (190, 153, 153) | Infrastructure |
-| 6 | Pole | (153, 153, 153) | Infrastructure |
-| 7 | TrafficLight | (250, 170, 30) | Infrastructure |
-| 8 | TrafficSign | (220, 220, 0) | Infrastructure |
-| 9 | Vegetation | (107, 142, 35) | Nature |
-| 10 | Terrain | (152, 251, 152) | Nature |
-| 11 | Sky | (70, 130, 180) | Nature |
-| 12 | Pedestrian | (220, 20, 60) | **Detection Target** |
-| 13 | Rider | (255, 0, 0) | **Detection Target** |
-| 14 | Car | (0, 0, 142) | **Detection Target** |
-| 15 | Truck | (0, 0, 70) | **Detection Target** |
-| 16 | Bus | (0, 60, 100) | **Detection Target** |
-| 17 | Train | (0, 80, 100) | **Detection Target** |
-| 18 | Motorcycle | (0, 0, 230) | **Detection Target** |
-| 19 | Bicycle | (119, 11, 32) | **Detection Target** |
-| 20 | Static | (110, 190, 160) | Special |
-| 21 | Dynamic | (170, 120, 50) | Special |
-| 22 | Other | (55, 90, 80) | Background |
-| 23 | Water | (45, 60, 150) | Nature |
-| 24 | RoadLine | (157, 234, 50) | Infrastructure |
-| 25 | Ground | (81, 0, 81) | Infrastructure |
-| 26 | Bridge | (150, 100, 100) | Infrastructure |
-| 27 | RailTrack | (230, 150, 140) | Infrastructure |
-| 28 | GuardRail | (180, 165, 180) | Infrastructure |
-| 29 | Rock | (180, 130, 70) | Nature |
+### Initial placement
 
-**Note:** Bounding box annotations in `annotations_voc/` are provided **only for classes 12-19** (vehicles and pedestrians). All other classes appear only in the semantic segmentation masks.
+```python
+# Get all road spawn points from the map
+spawn_points = world.get_map().get_spawn_points()
 
----
+# Augment with offset variants for more coverage positions
+spawn_points = bbox_carla.augment_spawn_points(
+    spawn_points,
+    variants     = SPAWN_AUG_VARIANTS,      # 6 offset variants per real point
+    forward_max  = SPAWN_AUG_FORWARD_MAX,   # ±20m along road
+    lateral_max  = SPAWN_AUG_LATERAL_MAX,   # ±15m sideways
+    yaw_max      = SPAWN_AUG_YAW_MAX        # ±30° rotation
+)
 
-## Object Detection Classes
+# Pick spawn point from config
+base_sp = spawn_points[cam_index]   # e.g. cam_index = 45
 
-The following classes have bounding box annotations in Pascal VOC format:
-
-| Class ID | Class Name | VOC Label |
-|----------|------------|-----------|
-| 12 | Pedestrian | `pedestrian` |
-| 13 | Rider | `rider` |
-| 14 | Car | `car` |
-| 15 | Truck | `truck` |
-| 16 | Bus | `bus` |
-| 17 | Train | `train` |
-| 18 | Motorcycle | `motorcycle` |
-| 19 | Bicycle | `bicycle` |
+# Build camera transform:
+# - XY from the spawn point (road position)
+# - Z from config  (altitude above ground)
+# - pitch = -90    (straight down)
+cam_trans = carla.Transform(
+    carla.Location(
+        x = base_sp.location.x,
+        y = base_sp.location.y,
+        z = cfg["camera"]["z"]           # 50.0m
+    ),
+    carla.Rotation(
+        pitch = cfg["camera"]["pitch"],  # -90.0
+        yaw   = 0.0,
+        roll  = 0.0
+    )
+)
+```
 
 ---
 
-## File Format Details
+## Dynamic Camera Repositioning (Runtime)
 
-### RGB Images (`rgb/`)
-- Standard PNG images (1280×720)
-- Color format: BGR (OpenCV convention)
+During a live run the camera can be moved **without stopping the pipeline** —
+traffic, export counters, and all state remain untouched.
 
-### Class ID Masks (`detmask/`)
-- Grayscale PNG (8-bit, single channel)
-- Pixel intensity = Class ID (0-29)
-- Example: Pixel value 14 = car, 1 = road, 12 = pedestrian
+| Key | Action |
+|-----|--------|
+| `C` | Move cameras to a random new spawn point |
+| `[` | Switch to previous weather preset |
+| `]` | Switch to next weather preset |
+| `Q` | Quit cleanly |
 
-### Color Segmentation (`seg/`)
-- Color-coded PNG using CityScapes palette
-- Each pixel colored according to its class (see table above)
+```python
+# Press C  stop old cameras, pick a new random position, respawn
+new_sp = random.choice(spawn_points)
+new_cam_trans = carla.Transform(
+    carla.Location(
+        x = new_sp.location.x,
+        y = new_sp.location.y,
+        z = cfg["camera"]["z"]           # same altitude
+    ),
+    carla.Rotation(
+        pitch = cfg["camera"]["pitch"],  # same angle
+        yaw   = 0.0,
+        roll  = 0.0
+    )
+)
+# Respawn both RGB and segmentation cameras at the new position
+camera, segmentation_cam, ... = bbox_camera.create_cameras(
+    world, bp_lib, new_cam_trans, cfg["camera"]["fov"], image_w, image_h
+)
+```
 
+---
 
-### VOC Annotations (`annotations_voc/`)
-- Pascal VOC XML format
-- Contains bounding boxes only for classes 12-19
-- All coordinates clipped to image bounds: 0 ≤ x < 1280, 0 ≤ y < 720
+## Weather Presets
+
+| Value | Description |
+|-------|-------------|
+| `ClearNoon` | Bright midday, no clouds |
+| `ClearSunset` | Golden hour, long shadows |
+| `CloudyNoon` | Overcast midday |
+| `WetNoon` | Wet roads, midday |
+| `HardRainNoon` | Heavy rain, midday |
+| `SoftRainNoon` | Light rain, midday |
+| `MidRainyNoon` | Moderate rain, midday |
+| `WetSunset` | Wet roads, sunset |
+| `HardRainSunset` | Heavy rain, sunset |
+| `SoftRainSunset` | Light rain, sunset |

@@ -9,17 +9,17 @@ carla:
 camera:
   width: 1280
   height: 720
-  fov: 90
-  z: 60.0
+  fov: 80
+  z: 70.0
   pitch: -90.0
 
 run:
-  duration: 25
+  duration: 30
   cam_index: 45
 
 traffic:
-  vehicles: 15
-  walkers: 0
+  vehicles: 25
+  walkers: 10
 
 processing:
   process_interval: 2
@@ -30,5 +30,7 @@ export:
   export_interval: 4
   export_start_frame: 30
   export_end_percent: 0.95
+  spawn_change_interval: 8
+  weather_change_interval: 4
   max_exports: 100
 
