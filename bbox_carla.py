@@ -1,6 +1,7 @@
 import carla
 import time
-
+import math
+import random
 # Connect to CARLA simulator server
 def connect_client(host="localhost", port=2000, timeout=10.0):
     client = carla.Client(host, port, worker_threads=4)
@@ -112,3 +113,55 @@ def cleanup_actors(client, world, sensors):
         world.tick()
     except Exception:
         pass
+
+
+def augment_spawn_points(spawn_points, variants=6,
+                         forward_max=10.0,
+                         lateral_max=3.0,
+                         yaw_max=15.0):
+    """
+    Augment a list of spawn points by applying small random offsets.
+    Each real spawn point generates `variants` extra positions.
+
+    Args:
+        spawn_points : list of carla.Transform  (from world.get_map().get_spawn_points())
+        variants     : number of augmented variants per real spawn point
+        forward_max  : max forward/backward offset in meters
+        lateral_max  : max left/right offset in meters
+        yaw_max      : max yaw rotation offset in degrees
+
+    Returns:
+        list of carla.Transform  (original + augmented, shuffled)
+    """
+    augmented = list(spawn_points)  # keep originals
+
+    for sp in spawn_points:
+        yaw_rad = math.radians(sp.rotation.yaw)
+
+        # Unit vectors along and perpendicular to the road
+        forward = ( math.cos(yaw_rad),  math.sin(yaw_rad))
+        lateral = (-math.sin(yaw_rad),  math.cos(yaw_rad))
+
+        for _ in range(variants):
+            # Random offsets
+            fwd_off = random.uniform(-forward_max, forward_max)
+            lat_off = random.uniform(-lateral_max, lateral_max)
+            yaw_off = random.uniform(-yaw_max,     yaw_max)
+
+            new_x = sp.location.x + forward[0] * fwd_off + lateral[0] * lat_off
+            new_y = sp.location.y + forward[1] * fwd_off + lateral[1] * lat_off
+            new_z = sp.location.z  # keep original height
+
+            new_transform = carla.Transform(
+                carla.Location(x=new_x, y=new_y, z=new_z),
+                carla.Rotation(
+                    pitch=sp.rotation.pitch,
+                    yaw=sp.rotation.yaw + yaw_off,
+                    roll=sp.rotation.roll
+                )
+            )
+            augmented.append(new_transform)
+
+    random.shuffle(augmented)
+    print(f"[SPAWN POINTS] {len(spawn_points)} real → {len(augmented)} total (×{variants+1})")
+    return augmented

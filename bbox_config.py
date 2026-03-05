@@ -29,6 +29,12 @@ def setup_output_dirs():
             shutil.rmtree(d)
         os.makedirs(d, exist_ok=True)
 
+# Spawn point augmentation settings
+SPAWN_AUG_VARIANTS    = 6       # augmented variants per real spawn point
+SPAWN_AUG_FORWARD_MAX = 20.0    # meters forward/backward along road
+SPAWN_AUG_LATERAL_MAX = 15.0     # meters left/right of road center
+SPAWN_AUG_YAW_MAX     = 30.0    # degrees rotation offset
+
 # Weather presets for diverse data collection
 weather_presets = [
     carla.WeatherParameters.Default,

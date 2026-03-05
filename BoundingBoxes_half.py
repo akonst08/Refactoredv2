@@ -44,6 +44,16 @@ bbox_carla.setup_synchronous_mode(world, fixed_delta_seconds=cfg["carla"]["fixed
 bp_lib = world.get_blueprint_library()
 spawn_points = world.get_map().get_spawn_points()
 
+# Augment spawn points for heterogeneous dataset coverage
+spawn_points = bbox_carla.augment_spawn_points(
+    spawn_points,
+    variants     = bbox_config.SPAWN_AUG_VARIANTS,
+    forward_max  = bbox_config.SPAWN_AUG_FORWARD_MAX,
+    lateral_max  = bbox_config.SPAWN_AUG_LATERAL_MAX,
+    yaw_max      = bbox_config.SPAWN_AUG_YAW_MAX
+)
+
+print(f"[SPAWN POINTS] Total available positions: {len(spawn_points)}")
 # Position camera at specified spawn point but elevated (z=60) with top-down view (pitch=-90)
 cam_index = cfg["run"]["cam_index"]
 
@@ -129,8 +139,9 @@ EXPORT_START_FRAME = cfg["export"]["export_start_frame"]
 EXPORT_END_PERCENT = cfg["export"]["export_end_percent"]
 # Maximum number of frames to export
 MAX_EXPORTS = cfg["export"]["max_exports"]
-
-
+# Changing spawn points and weather every N frames for dataset diversity
+SPAWN_CHANGE_INTERVAL = cfg["export"]["spawn_change_interval"]
+WEATHER_CHANGE_INTERVAL = cfg["export"]["weather_change_interval"]
 
 #  STATE TRACKING VARIABLES 
 # Counter for exported frames
@@ -237,7 +248,7 @@ try:
         # REMOVE small ghost boxes that follow/overlap a larger vehicle box
         boxes_xyxy_cls = bbox_detection.suppress_contained_boxes(
             boxes_xyxy_cls,
-            iou_threshold=0.6
+            iou_threshold=0.2
         )
 
         # We erase ALL spawned actors from static mask, even occluded ones
@@ -355,7 +366,7 @@ try:
                 mask[m == 1] = cid     # Set new pixels
 
             # 2) cars / trucks / buses (conservative - just light cleanup)
-            kernel_car = np.ones((3, 3), np.uint8)
+            kernel_car = np.ones((7, 7), np.uint8)
             for cid in (13, 14, 15, 16, 17):  # rider, car, truck, bus, train
                 m = (mask == cid).astype(np.uint8)
                 m = cv2.morphologyEx(m, cv2.MORPH_OPEN, kernel_car, iterations=1)
@@ -383,7 +394,7 @@ try:
                         continue
                     visible_pixels = np.sum(roi == cid)
                     visibility_ratio = visible_pixels / total_pixels
-                    if visibility_ratio < 0.60:
+                    if visibility_ratio < 0.40:
                         continue
 
                     boxes_xyxy_cls.append((xmin, ymin, xmax, ymax, cid))
@@ -404,6 +415,7 @@ try:
             
             export_count += 1
             print(f"[EXPORT {export_count}/{MAX_EXPORTS}] Frame {frame_count}: {len(boxes_xyxy_cls)} boxes")
+            
         
         frame_id = f"{frame_count:06d}"
         img_bgr = img[:, :, :3]
