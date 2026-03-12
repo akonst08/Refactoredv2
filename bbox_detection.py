@@ -81,15 +81,16 @@ def finite_bbox(verts, W, H, min_size=1):
     
     return x_min, x_max, y_min, y_max
 
+
 # Filter bounding boxes using segmentation image to remove false positives
 # Rejects boxes where background pixels exceed the threshold ratio
 @timeit("filter_boxes_segmentation")
-def filter_boxes_segmentation(boxes, seg_img, bg_thr=0.65):
+def filter_boxes_segmentation(boxes, seg_img, bg_thr=0.65, camera_z = 30.0):
     if not boxes:
         return []
     
     seg_bgr = seg_img[:, :, :3]
-    
+    SMALL_CLASSES = {12, 13, 18, 19}  # pedestrian, rider, motorcycle, bicycle
     # Pre-compute background mask for entire image once
     # Create a lookup by converting RGB to a single integer for fast comparison
     bg_set = set(tuple(color) for color in BACKGROUND_COLORS)
@@ -113,6 +114,11 @@ def filter_boxes_segmentation(boxes, seg_img, bg_thr=0.65):
         if total_pixels == 0:
             continue
 
+        if cid in SMALL_CLASSES:
+            effective_bg_thr = bg_thr_for_class(cid, camera_z)
+        else:
+            effective_bg_thr = bg_thr
+
         # Reshape ROI to 2D array of pixels (N x 3)
         roi_reshaped = roi.reshape(-1, 3)
         
@@ -122,8 +128,8 @@ def filter_boxes_segmentation(boxes, seg_img, bg_thr=0.65):
         bg_pixels = matches.any(axis=1).sum()
         
         bg_ratio = bg_pixels / total_pixels
-        
-        if bg_ratio < bg_thr:
+
+        if bg_ratio < effective_bg_thr:
             keep.append((xmin, ymin, xmax, ymax, cid))
 
     return keep
@@ -242,3 +248,73 @@ def suppress_contained_boxes(boxes, iou_threshold=0.6):
             keep.append(box_a)
 
     return keep
+def nms_boxes(boxes, iou_threshold=0.35):
+    """
+    IoU-based NMS across ALL boxes (dynamic + static combined).
+    Keeps the larger box when two boxes of any class overlap above threshold.
+    This catches duplicate detections from the 3D projection and segmentation
+    pipelines firing on the same physical object.
+    """
+    if len(boxes) == 0:
+        return boxes
+
+    # Sort by box area descending — keep larger box when duplicates found
+    boxes_sorted = sorted(boxes, key=lambda b: (b[2]-b[0]) * (b[3]-b[1]), reverse=True)
+    keep = []
+
+    for box_a in boxes_sorted:
+        x1a, y1a, x2a, y2a, cid_a = box_a
+        suppressed = False
+
+        for box_b in keep:
+            x1b, y1b, x2b, y2b, cid_b = box_b
+
+            # Compute IoU
+            ix1 = max(x1a, x1b)
+            iy1 = max(y1a, y1b)
+            ix2 = min(x2a, x2b)
+            iy2 = min(y2a, y2b)
+
+            if ix2 <= ix1 or iy2 <= iy1:
+                continue
+
+            inter = (ix2 - ix1) * (iy2 - iy1)
+            area_a = max(1, (x2a - x1a) * (y2a - y1a))
+            area_b = max(1, (x2b - x1b) * (y2b - y1b))
+            union = area_a + area_b - inter
+            iou_score = inter / union if union > 0 else 0.0
+
+            if iou_score > iou_threshold:
+                suppressed = True
+                break
+
+        if not suppressed:
+            keep.append(box_a)
+
+    return keep
+
+def bg_thr_for_class(cid, camera_z):
+    """
+    Compute background threshold dynamically based on class and camera height.
+    Higher z = smaller objects = more background pixels in their bounding box
+    needs a higher threshold to avoid rejecting valid detections.
+    """
+    # Base thresholds per class at z=30 (ground truth from your observations)
+    BASE_THR = {
+        12: 0.70,   # pedestrian
+        13: 0.40,   # rider
+        18: 0.40,   # motorcycle
+        19: 0.40,   # bicycle
+    }
+    DEFAULT_BASE = 0.40  # cars, trucks, buses
+
+    base = BASE_THR.get(cid, DEFAULT_BASE)
+
+    # Linear scale: every +10 units of z adds ~0.009 per base unit
+    # Derived from: z=30->0.70, z=40->0.80 means +0.10 per 10 units for pedestrian
+    z_ref = 30.0
+    scale = (camera_z - z_ref) / 5.0 * 0.010  # 0.010 per unit base per 10m height
+
+    # Apply scale proportionally to base, cap at 0.95 to never block everything
+    dynamic_thr = min(0.95, base + base * scale)
+    return dynamic_thr

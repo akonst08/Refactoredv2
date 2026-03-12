@@ -15,8 +15,9 @@ def seg_callback(image, data_dict):
     arr_raw = arr_raw.reshape((image.height, image.width, 4))
     
     data_dict['labels'] = arr_raw[:, :, 2] # Correct class IDs
+    
     # DEBUG MESSAGE 
-    print(data_dict['labels']) 
+    #print(data_dict['labels']) 
 
     # Apply CityScapes color palette for semantic classes
     image.convert(carla.ColorConverter.CityScapesPalette)

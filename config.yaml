@@ -9,8 +9,8 @@ carla:
 camera:
   width: 1280
   height: 720
-  fov: 80
-  z: 70.0
+  fov: 60
+  z: 50.0
   pitch: -90.0
 
 run:
@@ -30,7 +30,7 @@ export:
   export_interval: 4
   export_start_frame: 30
   export_end_percent: 0.95
-  spawn_change_interval: 8
+  spawn_change_interval: 20
   weather_change_interval: 4
   max_exports: 100
 

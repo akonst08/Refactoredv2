@@ -42,27 +42,29 @@ bbox_carla.setup_synchronous_mode(world, fixed_delta_seconds=cfg["carla"]["fixed
 #  CAMERA SPAWNING 
 # Get blueprint library and available spawn points from the map
 bp_lib = world.get_blueprint_library()
-spawn_points = world.get_map().get_spawn_points()
+original_spawn_points = world.get_map().get_spawn_points()
 
 # Augment spawn points for heterogeneous dataset coverage
-spawn_points = bbox_carla.augment_spawn_points(
-    spawn_points,
+camera_spawn_points = bbox_carla.augment_spawn_points(
+    original_spawn_points,
+    world,
     variants     = bbox_config.SPAWN_AUG_VARIANTS,
     forward_max  = bbox_config.SPAWN_AUG_FORWARD_MAX,
     lateral_max  = bbox_config.SPAWN_AUG_LATERAL_MAX,
     yaw_max      = bbox_config.SPAWN_AUG_YAW_MAX
 )
 
-print(f"[SPAWN POINTS] Total available positions: {len(spawn_points)}")
+print(f"[SPAWN POINTS] Total available camera positions: {len(camera_spawn_points)} ")
+print(f"[SPAWN POINTS] Total available pedestrian positions: {len(original_spawn_points)} ")
 # Position camera at specified spawn point but elevated (z=60) with top-down view (pitch=-90)
 cam_index = cfg["run"]["cam_index"]
 
-if cam_index >= len(spawn_points):
-    raise ValueError(f"cam_index {cam_index} out of range (map has {len(spawn_points)} spawn points)")
+if cam_index >= len(camera_spawn_points):
+    raise ValueError(f"cam_index {cam_index} out of range (map has {len(camera_spawn_points)} spawn points)")
 
-base_sp = spawn_points[cam_index]
+base_sp = camera_spawn_points[cam_index]
 
-cam_trans = carla.Transform(carla.Location(x=base_sp.location.x, y=base_sp.location.y, z=cfg["camera"]["z"]),
+cam_trans = carla.Transform(carla.Location(x=base_sp.location.x, y=base_sp.location.y, z=base_sp.location.z +cfg["camera"]["z"]),
                              carla.Rotation(pitch=cfg["camera"]["pitch"], yaw=0.0, roll=0.0))
 
 # Create RGB and semantic segmentation cameras with specified resolution and FOV
@@ -72,6 +74,7 @@ camera, segmentation_cam, camera_data, segmentation_data, camera_bp, semantic_bp
     world, bp_lib, cam_trans, cfg["camera"]["fov"], image_w, image_h
 )
 
+all_sensors = [camera, segmentation_cam]
 # Create Pygame window for live visualization
 screen = pygame.display.set_mode((image_w, image_h))
 pygame.display.set_caption("CARLA view")
@@ -85,15 +88,22 @@ segmentation_writer = None
 K = bbox_detection.build_projection_matrix(image_w, image_h, cfg["camera"]["fov"])
 
 #  TRAFFIC SPAWNING 
+# Add this block right after the vehicle spawning loop (after line 105):
+traffic_manager = client.get_trafficmanager()
+traffic_manager.set_global_distance_to_leading_vehicle(2.0)
+
+# THIS is the key line — stops TM from spawning its own vehicles
+traffic_manager.set_synchronous_mode(True)
 #Spawn vehicles with autopilot for dynamic scene
 vehicle_bps = bp_lib.filter('*vehicle*')
+spawned_vehicles = []
 for _ in range(cfg["traffic"]["vehicles"]):
-    sp = random.choice(world.get_map().get_spawn_points())
+    sp = random.choice(original_spawn_points)
     vbp = random.choice(vehicle_bps)
     spawned_vehicle = world.try_spawn_actor(vbp, sp)
     if spawned_vehicle:
-        spawned_vehicle.set_autopilot(True)
-                # DEBUG: print semantic class IDs
+        spawned_vehicle.set_autopilot(True, traffic_manager.get_port())
+        spawned_vehicles.append(spawned_vehicle)
         print(
             "[SPAWNED]",
             spawned_vehicle.type_id,
@@ -101,8 +111,16 @@ for _ in range(cfg["traffic"]["vehicles"]):
             spawned_vehicle.semantic_tags
         )
 
+print(f"[TRAFFIC] Spawned {len(spawned_vehicles)} vehicles")
+
 # Spawn pedestrian walkers with AI controllers for realistic movement
 walker_bps = bp_lib.filter('*walker*')
+ctrl_bp = bp_lib.find('controller.ai.walker')
+
+spawned_walkers = []
+walker_controllers = []
+
+# Step 1: Spawn ALL walkers first
 for _ in range(cfg["traffic"]["walkers"]):
     sp = carla.Transform()
     sp.location = world.get_random_location_from_navigation()
@@ -110,22 +128,32 @@ for _ in range(cfg["traffic"]["walkers"]):
         wbp = random.choice(walker_bps)
         walker = world.try_spawn_actor(wbp, sp)
         if walker:
-            world.tick() 
-            # Attach AI controller to make the walker move autonomously
-            ctrl_bp = bp_lib.find('controller.ai.walker')
-            ctrl = world.spawn_actor(ctrl_bp, carla.Transform(), attach_to=walker)
-            world.tick()
-            ctrl.start()
-            ctrl.go_to_location(world.get_random_location_from_navigation())
-            ctrl.set_max_speed(1 + random.random())
+            spawned_walkers.append(walker)
 
-# Spawn a stationary "dummy" vehicle to keep traffic manager active
-# vehicle_bp = bp_lib.filter('*mini*')[0]
-# dummy_sp = spawn_points[0]
-# dummy_vehicle = world.try_spawn_actor(vehicle_bp, dummy_sp)
-# if dummy_vehicle:
-#     dummy_vehicle.set_autopilot(False)
-#     dummy_vehicle.apply_control(carla.VehicleControl(throttle=0, brake=1))
+# Step 2: Tick once so all walkers are registered in simulation
+world.tick()
+
+# Step 3: Attach AI controller to each walker
+for walker in spawned_walkers:
+    try:
+        ctrl = world.spawn_actor(ctrl_bp, carla.Transform(), attach_to=walker)
+        walker_controllers.append(ctrl)
+    except Exception as e:
+        print(f"[WARN] Controller attach failed: {e}")
+
+# Step 4: Tick once so all controllers are registered
+world.tick()
+
+# Step 5: Start all controllers
+for ctrl in walker_controllers:
+    try:
+        ctrl.start()
+        ctrl.go_to_location(world.get_random_location_from_navigation())
+        ctrl.set_max_speed(1 + random.random())
+    except RuntimeError as e:
+        print(f"[WARN] ctrl.start() failed (skipping): {e}")
+
+print(f"[TRAFFIC] {len(spawned_walkers)} walkers | {len(walker_controllers)} controllers ready")
 
 #  PERFORMANCE & EXPORT SETTINGS 
 
@@ -150,6 +178,7 @@ export_count = 0
 timeout_count = 0
 # Last frame where FPS was reported
 last_fps_report = 0
+# Track ALL camera pairs ever created so cleanup never misses one
 
 # Timing and weather control
 start_time = time.time()
@@ -243,7 +272,8 @@ try:
         boxes_xyxy_cls = bbox_detection.filter_boxes_segmentation(
             boxes_xyxy_cls,
             seg_img,
-            bg_thr=0.40
+            bg_thr=0.40,
+            camera_z=cfg["camera"]["z"]
         )
         # REMOVE small ghost boxes that follow/overlap a larger vehicle box
         boxes_xyxy_cls = bbox_detection.suppress_contained_boxes(
@@ -285,7 +315,8 @@ try:
             # DEBUG: verify semantic IDs (print once or a few times)
             if export_count > 10:   # avoid spamming
                 ids, counts = np.unique(classid_mask, return_counts=True)
-                print(dict(zip(ids, counts)))
+                # DEBUG SHOWS IDS AND PIXEL COUNTS
+                #print(dict(zip(ids, counts)))
             
             classid_path = os.path.join(
                 bbox_config.IMG_DETMASK_DIR,
@@ -294,35 +325,7 @@ try:
 
             cv2.imwrite(classid_path, classid_mask)
 
-            # ===== VISUAL VALIDATION: overlay class on segmentation =====
-            # if export_count == 0:  # do once
-            #     cid = 19  # try 18 (motorcycle), 19 (bicycle), 14 (car), 25 (rider)
 
-            #     overlay = seg_bgr.copy()
-
-            #     mask = (classid_mask == cid)
-            #     overlay[mask] = (0, 255, 255)  # bright yellow overlay
-
-            #     cv2.imwrite(
-            #         os.path.join(bbox_config.IMG_DETMASK_DIR,
-            #                     f"frame_{frame_id}_overlay_id{cid}.png"),
-            #         overlay
-            #     )
-
-            # if export_count < 10:
-            #     CAR_ID = 14  # car in your palette
-
-            #     # isolate all car pixels from segmentation
-            #     car_pixels = np.zeros_like(seg_bgr)
-            #     car_pixels[classid_mask == CAR_ID] = seg_bgr[classid_mask == CAR_ID]
-
-            #     cv2.imwrite(
-            #         os.path.join(
-            #             bbox_config.IMG_DETMASK_DIR,
-            #             f"frame_{frame_id}_cars_only.png"
-            #         ),
-            #         car_pixels
-            #     )
 
             # Collect dynamic boxes to avoid duplicates
             dynamic_boxes = [
@@ -331,22 +334,31 @@ try:
             ]
             
             
-            # ===========================================================
+          
             # CREATE STATIC-ONLY MASK: Erase all spawned actors (FAST)
             # Reuse already-projected boxes from detection phase above
-            # ===========================================================
+            
             static_classid_mask = classid_mask.copy()
             static_seg_bgr = seg_bgr.copy()
             pad = 8  # small padding to ensure full erasure
             # Zero out all spawned actor regions (already computed above!)
+            # for (x_min, y_min, x_max, y_max) in all_spawned_boxes:
+            #     static_classid_mask[y_min:y_max, x_min:x_max] = 0
+            #     static_seg_bgr[y_min:y_max, x_min:x_max] = (0, 0, 0)
+
             for (x_min, y_min, x_max, y_max) in all_spawned_boxes:
-                static_classid_mask[y_min:y_max, x_min:x_max] = 0
-                static_seg_bgr[y_min:y_max, x_min:x_max] = (0, 0, 0)
-           
-            # ===========================================================
+                box_w = x_max - x_min
+                box_h = y_max - y_min
+                dynamic_pad = max(pad, int(max(box_w, box_h) * 0.15))
+                y1c = max(0, y_min - dynamic_pad)
+                y2c = min(image_h, y_max + dynamic_pad)
+                x1c = max(0, x_min - dynamic_pad)
+                x2c = min(image_w, x_max + dynamic_pad)
+                static_classid_mask[y1c:y2c, x1c:x2c] = 0
+                static_seg_bgr[y1c:y2c, x1c:x2c] = (0, 0, 0)            
+         
             # DERIVE STATIC BOXES FROM CLEANED MASK
             # Now this mask contains ONLY map objects, no spawned actors
-            # ===========================================================
 
             mask = static_classid_mask.copy()
 
@@ -379,7 +391,7 @@ try:
                 static_boxes = bbox_detection.extract_static_boxes(
                     mask,
                     cid,
-                    min_area=30 if cid in (18, 19) else 80
+                    min_area=1 if cid in (18, 19) else 80
                 )
 
                 for (xmin, ymin, xmax, ymax) in static_boxes:
@@ -394,10 +406,14 @@ try:
                         continue
                     visible_pixels = np.sum(roi == cid)
                     visibility_ratio = visible_pixels / total_pixels
-                    if visibility_ratio < 0.40:
+                    
+                    min_vis = 0.15 if cid in (18, 19) else 0.40  # allow lower visibility for small objects
+                    if visibility_ratio < min_vis:
                         continue
 
                     boxes_xyxy_cls.append((xmin, ymin, xmax, ymax, cid))
+            # Deduplicate across dynamic + static pipelines
+            boxes_xyxy_cls = bbox_detection.nms_boxes(boxes_xyxy_cls, iou_threshold=0.35)            
 
             overlay = img_bgr.copy()
             for (x1, y1, x2, y2, cid) in boxes_xyxy_cls:
@@ -407,7 +423,6 @@ try:
             static_seg_path = os.path.join(bbox_config.IMG_STATIC_DEBUG_DIR, f"frame_{frame_id}_static_seg.png")
             cv2.imwrite(static_seg_path, static_seg_bgr)
             cv2.imwrite(boxed_path, overlay)
-        # ===========================================================
 
             # 5) Export bounding box annotations in Pascal VOC XML format
             voc_path = os.path.join(bbox_config.VOC_DIR, f"frame_{frame_id}.xml")
@@ -476,39 +491,40 @@ try:
         # Press 'C' key to move cameras to a random spawn point
         if keys[pygame.K_c]:
             print("Repositioning cameras...")
-            
-            # Stop and destroy old cameras
-            try:
-                camera.stop()
-                segmentation_cam.stop()
-            except Exception:
-                pass
-            
-            time.sleep(0.05)
-            
-            try:
-                camera.destroy()
-                segmentation_cam.destroy()
-            except Exception:
-                pass
-            
+            all_sensors = bbox_carla.safe_destroy_cameras(camera, segmentation_cam, all_sensors)
             world.tick()
 
-            # Create new cameras at random location
-            new_sp = random.choice(spawn_points)
+            new_sp = random.choice(camera_spawn_points)     # ← augmented only
             new_cam_trans = carla.Transform(
-                carla.Location(x=new_sp.location.x, y=new_sp.location.y, z=cfg["camera"]["z"]),
+                carla.Location(x=new_sp.location.x, y=new_sp.location.y,
+                               z=new_sp.location.z + cfg["camera"]["z"]),
                 carla.Rotation(pitch=cfg["camera"]["pitch"], yaw=0.0, roll=0.0)
             )
-
-            camera, segmentation_cam, camera_data, segmentation_data, _, _ = bbox_camera.create_cameras(
-                world, bp_lib, new_cam_trans, cfg["camera"]["fov"], image_w, image_h
-            )
-
+            camera, segmentation_cam, camera_data, segmentation_data, _, _ = \
+                bbox_camera.create_cameras(world, bp_lib, new_cam_trans,
+                                           cfg["camera"]["fov"], image_w, image_h)
+            all_sensors.extend([camera, segmentation_cam])
             world.tick()
-            time.sleep(0.05)
-            
-            print(f"Cameras moved to spawn {spawn_points.index(new_sp)}")
+            print("[Reposition] Camera moved.")
+
+        #  AUTO CAMERA REPOSITIONING 
+        if SPAWN_CHANGE_INTERVAL > 0 and frame_count > 0 and frame_count % SPAWN_CHANGE_INTERVAL == 0:
+            print(f"[AUTO REPOSITION] Frame {frame_count} — moving camera...")
+            all_sensors = bbox_carla.safe_destroy_cameras(camera, segmentation_cam, all_sensors)
+            world.tick()
+
+            new_sp = random.choice(camera_spawn_points)     # ← augmented only
+            new_cam_trans = carla.Transform(
+                carla.Location(x=new_sp.location.x, y=new_sp.location.y,
+                               z=new_sp.location.z + cfg["camera"]["z"]),
+                carla.Rotation(pitch=cfg["camera"]["pitch"], yaw=0.0, roll=0.0)
+            )
+            camera, segmentation_cam, camera_data, segmentation_data, _, _ = \
+                bbox_camera.create_cameras(world, bp_lib, new_cam_trans,
+                                           cfg["camera"]["fov"], image_w, image_h)
+            all_sensors.extend([camera, segmentation_cam])
+            world.tick()
+            print("[AUTO REPOSITION] Done.")
 
         frame_count += 1
 
@@ -539,7 +555,8 @@ finally:
             pass
     
     # Destroy all spawned actors (cameras, vehicles, walkers)
-    bbox_carla.cleanup_actors(client, world, sensors=[camera, segmentation_cam])
+    #bbox_carla.cleanup_actors(client, world, sensors=[camera, segmentation_cam])
+    bbox_carla.cleanup_actors(client, world, sensors=all_sensors)
     # Close Pygame window
     pygame.quit()
     print("Shutdown complete.")
