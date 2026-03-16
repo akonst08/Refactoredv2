@@ -184,14 +184,14 @@ last_fps_report = 0
 start_time = time.time()
 frame_count = 0
 weather_idx = 0
-
+# Calculate target frame count based on requested duration
+duration = cfg["run"]["duration"]
+target_frames = int(duration / world.get_settings().fixed_delta_seconds)
+EXPORT_END_FRAME = int(target_frames * EXPORT_END_PERCENT)
 try:
     #  MAIN SIMULATION LOOP 
     while True:
-        # Calculate target frame count based on requested duration
-        duration = cfg["run"]["duration"]
-        target_frames = int(duration / world.get_settings().fixed_delta_seconds)
-        EXPORT_END_FRAME = int(target_frames * EXPORT_END_PERCENT)
+
         
         # Check if simulation duration has been reached
         if frame_count >= target_frames:
