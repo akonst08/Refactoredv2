@@ -7,7 +7,6 @@ import pygame
 import cv2
 import os
 import time as time_module
-
 # Import refactored modules for configuration, CARLA management, 
 # camera handling, detection algorithms, and label export
 import bbox_config
@@ -15,6 +14,7 @@ import bbox_carla
 import bbox_camera
 import bbox_detection
 import bbox_labels
+from timing import create_io_executor, submit_image_write, submit_xml_write, wait_for_pending_writes
 
 
 
@@ -58,18 +58,19 @@ print(f"[SPAWN POINTS] Total available camera positions: {len(camera_spawn_point
 print(f"[SPAWN POINTS] Total available pedestrian positions: {len(original_spawn_points)} ")
 # Position camera at specified spawn point but elevated (z=60) with top-down view (pitch=-90)
 cam_index = cfg["run"]["cam_index"]
-
+camera_z = cfg["camera"]["z"]
 if cam_index >= len(camera_spawn_points):
     raise ValueError(f"cam_index {cam_index} out of range (map has {len(camera_spawn_points)} spawn points)")
 
 base_sp = camera_spawn_points[cam_index]
 
-cam_trans = carla.Transform(carla.Location(x=base_sp.location.x, y=base_sp.location.y, z=base_sp.location.z +cfg["camera"]["z"]),
+cam_trans = carla.Transform(carla.Location(x=base_sp.location.x, y=base_sp.location.y, z=base_sp.location.z +camera_z),
                              carla.Rotation(pitch=cfg["camera"]["pitch"], yaw=0.0, roll=0.0))
 
 # Create RGB and semantic segmentation cameras with specified resolution and FOV
 image_w = cfg['camera']['width']
 image_h = cfg['camera']['height']
+
 camera, segmentation_cam, camera_data, segmentation_data, camera_bp, semantic_bp = bbox_camera.create_cameras(
     world, bp_lib, cam_trans, cfg["camera"]["fov"], image_w, image_h
 )
@@ -82,6 +83,8 @@ pygame.display.set_caption("CARLA view")
 raw_writer = None
 boxed_writer = None
 segmentation_writer = None
+io_executor = create_io_executor(max_workers=4)
+pending_writes = []
 
 #  PROJECTION MATRIX 
 # Build camera intrinsic matrix for 3D to 2D projection
@@ -172,22 +175,26 @@ SPAWN_CHANGE_INTERVAL = cfg["export"]["spawn_change_interval"]
 WEATHER_CHANGE_INTERVAL = cfg["export"]["weather_change_interval"]
 
 #  STATE TRACKING VARIABLES 
-# Counter for exported frames
-export_count = 0
-# Counter for frame synchronization timeouts
-timeout_count = 0
-# Last frame where FPS was reported
-last_fps_report = 0
-# Track ALL camera pairs ever created so cleanup never misses one
+export_count = 0     # Counter for exported frames
+timeout_count = 0    # Counter for frame synchronization timeouts
+last_fps_report = 0  # Last frame where FPS was reported
 
 # Timing and weather control
 start_time = time.time()
 frame_count = 0
 weather_idx = 0
+boxes_xyxy_cls = []
 # Calculate target frame count based on requested duration
 duration = cfg["run"]["duration"]
 target_frames = int(duration / world.get_settings().fixed_delta_seconds)
 EXPORT_END_FRAME = int(target_frames * EXPORT_END_PERCENT)
+kernel_erode = np.ones((2, 2), np.uint8)   # Small erosion to separate
+kernel_dilate = np.ones((3, 3), np.uint8)  # Slightly larger dilation to restore size
+kernel_close = np.ones((3, 3), np.uint8)
+kernel_car = np.ones((5, 5), np.uint8)
+actors = world.get_actors()
+
+
 try:
     #  MAIN SIMULATION LOOP 
     while True:
@@ -225,8 +232,10 @@ try:
         #  DYNAMIC ACTOR DETECTION 
         # Project 3D bounding boxes of all vehicles and walkers onto 2D image plane
         boxes_xyxy_cls = []
+        dynamic_boxes_xyxy_cls = []
+        static_boxes_xyxy_cls = []
         all_spawned_boxes = []  # Store ALL projected boxes (before filtering)
-        actors = world.get_actors()
+        
         
         # Detect vehicles (cars, trucks, buses, motorcycles, bicycles)
         for a in actors.filter('*vehicle*'):
@@ -244,7 +253,7 @@ try:
             mm = bbox_detection.finite_bbox(verts, image_w, image_h, min_size=min_size)
             if mm:
                 x_min, x_max, y_min, y_max = mm
-                boxes_xyxy_cls.append((x_min, y_min, x_max, y_max, cid))
+                dynamic_boxes_xyxy_cls.append((x_min, y_min, x_max, y_max, cid))
                 # Store BEFORE filtering - we need to erase ALL actors from static mask
                 all_spawned_boxes.append((x_min, y_min, x_max, y_max))
         
@@ -264,87 +273,61 @@ try:
             mm = bbox_detection.finite_bbox(verts, image_w, image_h, min_size=min_size)
             if mm:
                 x_min, x_max, y_min, y_max = mm
-                boxes_xyxy_cls.append((x_min, y_min, x_max, y_max, cid))
+                dynamic_boxes_xyxy_cls.append((x_min, y_min, x_max, y_max, cid))
                 # Store BEFORE filtering - we need to erase ALL actors from static mask
                 all_spawned_boxes.append((x_min, y_min, x_max, y_max))
 
         # REMOVE ghost / occluded bounding boxes using semantic segmentation
-        boxes_xyxy_cls = bbox_detection.filter_boxes_segmentation(
-            boxes_xyxy_cls,
+        dynamic_boxes_xyxy_cls = bbox_detection.filter_boxes_segmentation(
+            dynamic_boxes_xyxy_cls,
             seg_img,
+            #segmentation_data['labels'],
             bg_thr=0.40,
-            camera_z=cfg["camera"]["z"]
+            camera_z=camera_z
         )
         # REMOVE small ghost boxes that follow/overlap a larger vehicle box
-        boxes_xyxy_cls = bbox_detection.suppress_contained_boxes(
-            boxes_xyxy_cls,
-            iou_threshold=0.2
+        dynamic_boxes_xyxy_cls = bbox_detection.suppress_contained_boxes(
+            dynamic_boxes_xyxy_cls,
+            overlap_threshold=0.75
         )
+        boxes_xyxy_cls = list(dynamic_boxes_xyxy_cls)
 
         # We erase ALL spawned actors from static mask, even occluded ones
         # This prevents dynamic vehicles from being detected as static when occluded
 
         # Determine if this frame should be exported based on settings
-        is_export_frame = (ENABLE_EXPORTS and 
-                          frame_count >= EXPORT_START_FRAME and 
-                          frame_count <= EXPORT_END_FRAME and
-                          frame_count % EXPORT_INTERVAL == 0 and
-                          export_count < MAX_EXPORTS and len(boxes_xyxy_cls) > 0) 
+        # is_export_frame = (ENABLE_EXPORTS and 
+        #                   frame_count >= EXPORT_START_FRAME and 
+        #                   frame_count <= EXPORT_END_FRAME and
+        #                   frame_count % EXPORT_INTERVAL == 0 and
+        #                   export_count < MAX_EXPORTS and len(dynamic_boxes_xyxy_cls) > 0)
+
+        # Determine if this frame is eligible for export processing
+        should_process_static = (
+            ENABLE_EXPORTS and
+            frame_count >= EXPORT_START_FRAME and
+            frame_count <= EXPORT_END_FRAME and
+            frame_count % EXPORT_INTERVAL == 0 and
+            export_count < MAX_EXPORTS
+        )
+ 
         
         #  FRAME EXPORT 
         # Save frame and annotations if this is an export frame
-        if is_export_frame:
+        if should_process_static:
             
             frame_id = f"{frame_count:06d}"
             img_bgr = img[:, :, :3]
             seg_bgr = seg_img[:, :, :3]
-
-            # 1) Export Save RGB image to disk
-            img_path = os.path.join(bbox_config.IMG_RGB_DIR, f"frame_{frame_id}.png")
-            cv2.imwrite(img_path, img_bgr)
-
-            # 2) Export RGB frame WITH bounding boxes (BOXED IMAGE)
-            boxed_path = os.path.join(bbox_config.IMG_BOXED_DIR, f"frame_{frame_id}_boxed.png")
-
-            # 3) Export segmentation mask
-            seg_path = os.path.join(bbox_config.IMG_SEG_DIR, f"frame_{frame_id}_seg.png")
-            cv2.imwrite(seg_path, seg_bgr)
-
-            # 4) Export CLASS-ID semantic mask (raw IDs)
             classid_mask = segmentation_data['labels']  # H x W, uint8
-            # DEBUG: verify semantic IDs (print once or a few times)
-            if export_count > 10:   # avoid spamming
-                ids, counts = np.unique(classid_mask, return_counts=True)
-                # DEBUG SHOWS IDS AND PIXEL COUNTS
-                #print(dict(zip(ids, counts)))
-            
-            classid_path = os.path.join(
-                bbox_config.IMG_DETMASK_DIR,
-                f"frame_{frame_id}_classid.png"
-            )
+            #print(np.unique(classid_mask))
 
-            cv2.imwrite(classid_path, classid_mask)
-
-
-
-            # Collect dynamic boxes to avoid duplicates
-            dynamic_boxes = [
-                (xmin, ymin, xmax, ymax)
-                for (xmin, ymin, xmax, ymax, _) in boxes_xyxy_cls
-            ]
-            
-            
-          
             # CREATE STATIC-ONLY MASK: Erase all spawned actors (FAST)
             # Reuse already-projected boxes from detection phase above
             
             static_classid_mask = classid_mask.copy()
             static_seg_bgr = seg_bgr.copy()
             pad = 8  # small padding to ensure full erasure
-            # Zero out all spawned actor regions (already computed above!)
-            # for (x_min, y_min, x_max, y_max) in all_spawned_boxes:
-            #     static_classid_mask[y_min:y_max, x_min:x_max] = 0
-            #     static_seg_bgr[y_min:y_max, x_min:x_max] = (0, 0, 0)
 
             for (x_min, y_min, x_max, y_max) in all_spawned_boxes:
                 box_w = x_max - x_min
@@ -363,8 +346,6 @@ try:
             mask = static_classid_mask.copy()
 
             # 1) bicycles / motorcycles - use erosion to separate touching objects
-            kernel_erode = np.ones((2, 2), np.uint8)  # Small erosion to separate
-            kernel_dilate = np.ones((3, 3), np.uint8)  # Slightly larger dilation to restore size
             for cid in (18, 19):
                 m = (mask == cid).astype(np.uint8)
                 # Erode to separate touching objects
@@ -372,26 +353,35 @@ try:
                 # Dilate to restore approximate original size
                 m = cv2.dilate(m, kernel_dilate, iterations=1)
                 # Light closing to reconnect slightly fragmented parts (not touching objects!)
-                kernel_close = np.ones((3, 3), np.uint8)
+                
                 m = cv2.morphologyEx(m, cv2.MORPH_CLOSE, kernel_close, iterations=1)
                 mask[mask == cid] = 0  # Clear old pixels
                 mask[m == 1] = cid     # Set new pixels
 
-            # 2) cars / trucks / buses (conservative - just light cleanup)
-            kernel_car = np.ones((7, 7), np.uint8)
+            # 2) cars / trucks / buses (conservative - just light cleanup)  
             for cid in (13, 14, 15, 16, 17):  # rider, car, truck, bus, train
                 m = (mask == cid).astype(np.uint8)
-                m = cv2.morphologyEx(m, cv2.MORPH_OPEN, kernel_car, iterations=1)
+                #m = cv2.morphologyEx(m, cv2.MORPH_OPEN, kernel_car, iterations=1)
                 m = cv2.morphologyEx(m, cv2.MORPH_CLOSE, kernel_car, iterations=1)
                 mask[mask == cid] = 0
                 mask[m == 1] = cid
 
+
+            present_ids = set(np.unique(mask))
             # extract static boxes
             for cid in bbox_config.STATIC_CLASS_IDS:
+                if cid not in present_ids:  # Not necessry to check for class_ids that are not present in the frame 
+                    continue
                 static_boxes = bbox_detection.extract_static_boxes(
                     mask,
                     cid,
                     min_area=1 if cid in (18, 19) else 80
+                )
+                if len(static_boxes) > 1: #Optimization, not necessary to check if its only 1 box
+                    static_boxes = bbox_detection.merge_fragmented_static_boxes(
+                    mask,
+                    static_boxes,
+                    cid
                 )
 
                 for (xmin, ymin, xmax, ymax) in static_boxes:
@@ -400,37 +390,75 @@ try:
 
                     # Reject boxes where the object doesn't fill enough of the bbox
                     # This prevents poles/lines splitting one car into two boxes
-                    roi = mask[ymin:ymax, xmin:xmax]
-                    total_pixels = roi.shape[0] * roi.shape[1]
+                    # roi = mask[ymin:ymax, xmin:xmax]
+                    # total_pixels = roi.shape[0] * roi.shape[1]
+                    # if total_pixels == 0:
+                    #     continue
+                    # visible_pixels = np.sum(roi == cid)
+                    # visibility_ratio = visible_pixels / total_pixels
+                    total_pixels = (ymax - ymin) * (xmax - xmin)
                     if total_pixels == 0:
                         continue
-                    visible_pixels = np.sum(roi == cid)
+
+                    raw_roi = static_classid_mask[ymin:ymax, xmin:xmax]
+                    visible_pixels = np.sum(raw_roi == cid)
                     visibility_ratio = visible_pixels / total_pixels
-                    
+  
                     min_vis = 0.15 if cid in (18, 19) else 0.40  # allow lower visibility for small objects
                     if visibility_ratio < min_vis:
                         continue
 
-                    boxes_xyxy_cls.append((xmin, ymin, xmax, ymax, cid))
-            # Deduplicate across dynamic + static pipelines
-            boxes_xyxy_cls = bbox_detection.nms_boxes(boxes_xyxy_cls, iou_threshold=0.35)            
-
-            overlay = img_bgr.copy()
-            for (x1, y1, x2, y2, cid) in boxes_xyxy_cls:
-                color = bbox_config.CLASS_COLORS.get(cid, bbox_config.DEFAULT_COLOR)
-                cv2.rectangle(overlay, (x1, y1), (x2, y2), color, 1)
-
-            static_seg_path = os.path.join(bbox_config.IMG_STATIC_DEBUG_DIR, f"frame_{frame_id}_static_seg.png")
-            cv2.imwrite(static_seg_path, static_seg_bgr)
-            cv2.imwrite(boxed_path, overlay)
-
-            # 5) Export bounding box annotations in Pascal VOC XML format
-            voc_path = os.path.join(bbox_config.VOC_DIR, f"frame_{frame_id}.xml")
-            bbox_labels.write_voc_xml(voc_path, boxes_xyxy_cls, image_w, image_h, img_path, bbox_config.CLASS_NAMES)
+                    static_boxes_xyxy_cls.append((xmin, ymin, xmax, ymax, cid))
+            # Deduplicate across dynamic + static pipelines           
+            static_boxes_xyxy_cls = bbox_detection.nms_boxes(static_boxes_xyxy_cls, iou_threshold=0.35)
+           
+            boxes_xyxy_cls = dynamic_boxes_xyxy_cls + static_boxes_xyxy_cls
             
-            export_count += 1
-            print(f"[EXPORT {export_count}/{MAX_EXPORTS}] Frame {frame_count}: {len(boxes_xyxy_cls)} boxes")
+            is_export_frame = len(boxes_xyxy_cls) > 0
+            if is_export_frame:
+                img_path = os.path.join(bbox_config.IMG_RGB_DIR, f"frame_{frame_id}.png")
+                boxed_path = os.path.join(bbox_config.IMG_BOXED_DIR, f"frame_{frame_id}_boxed.png")
+                seg_path = os.path.join(bbox_config.IMG_SEG_DIR, f"frame_{frame_id}_seg.png")
+                classid_path = os.path.join(
+                    bbox_config.IMG_DETMASK_DIR,
+                    f"frame_{frame_id}_classid.png"
+                )
+
+                if export_count > 10:   # avoid spamming
+                    ids, counts = np.unique(classid_mask, return_counts=True)
+                    # DEBUG SHOWS IDS AND PIXEL COUNTS
+                    #print(dict(zip(ids, counts)))
+
+                overlay = img_bgr.copy()
+                for (x1, y1, x2, y2, cid) in boxes_xyxy_cls:
+                    color = bbox_config.CLASS_COLORS.get(cid, bbox_config.DEFAULT_COLOR)
+                    cv2.rectangle(overlay, (x1, y1), (x2, y2), color, 1)
+
+                static_seg_path = os.path.join(bbox_config.IMG_STATIC_DEBUG_DIR, f"frame_{frame_id}_static_seg.png")
+                voc_path = os.path.join(bbox_config.VOC_DIR, f"frame_{frame_id}.xml")
+
+                submit_image_write(io_executor, pending_writes, cv2, img_path, img_bgr)
+                submit_image_write(io_executor, pending_writes, cv2, seg_path, seg_bgr)
+                submit_image_write(io_executor, pending_writes, cv2, classid_path, classid_mask)
+                submit_image_write(io_executor, pending_writes, cv2, static_seg_path, static_seg_bgr)
+                submit_image_write(io_executor, pending_writes, cv2, boxed_path, overlay)
+                submit_xml_write(
+                    io_executor,
+                    pending_writes,
+                    bbox_labels.write_voc_xml,
+                    voc_path,
+                    boxes_xyxy_cls,
+                    image_w,
+                    image_h,
+                    img_path,
+                    bbox_config.CLASS_NAMES,
+                )
+
+                export_count += 1
+                print(f"[EXPORT {export_count}/{MAX_EXPORTS}] Frame {frame_count}: {len(boxes_xyxy_cls)} boxes")
             
+
+
         
         frame_id = f"{frame_count:06d}"
         img_bgr = img[:, :, :3]
@@ -497,7 +525,7 @@ try:
             new_sp = random.choice(camera_spawn_points)     # ← augmented only
             new_cam_trans = carla.Transform(
                 carla.Location(x=new_sp.location.x, y=new_sp.location.y,
-                               z=new_sp.location.z + cfg["camera"]["z"]),
+                               z=new_sp.location.z + camera_z),
                 carla.Rotation(pitch=cfg["camera"]["pitch"], yaw=0.0, roll=0.0)
             )
             camera, segmentation_cam, camera_data, segmentation_data, _, _ = \
@@ -516,7 +544,7 @@ try:
             new_sp = random.choice(camera_spawn_points)     # ← augmented only
             new_cam_trans = carla.Transform(
                 carla.Location(x=new_sp.location.x, y=new_sp.location.y,
-                               z=new_sp.location.z + cfg["camera"]["z"]),
+                               z=new_sp.location.z + camera_z),
                 carla.Rotation(pitch=cfg["camera"]["pitch"], yaw=0.0, roll=0.0)
             )
             camera, segmentation_cam, camera_data, segmentation_data, _, _ = \
@@ -553,7 +581,13 @@ finally:
                 writer.release()
         except Exception:
             pass
-    
+    # Wait for all background image/XML writes to finish
+    try:
+        wait_for_pending_writes(pending_writes)
+    except Exception as e:
+        print(f"[WARN] Background write failed: {e}")
+    finally:
+        io_executor.shutdown(wait=True) #Free the resources that were being used by the executor
     # Destroy all spawned actors (cameras, vehicles, walkers)
     #bbox_carla.cleanup_actors(client, world, sensors=[camera, segmentation_cam])
     bbox_carla.cleanup_actors(client, world, sensors=all_sensors)

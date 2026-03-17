@@ -93,7 +93,6 @@ def filter_boxes_segmentation(boxes, seg_img, bg_thr=0.65, camera_z = 30.0):
     SMALL_CLASSES = {12, 13, 18, 19}  # pedestrian, rider, motorcycle, bicycle
     # Pre-compute background mask for entire image once
     # Create a lookup by converting RGB to a single integer for fast comparison
-    bg_set = set(tuple(color) for color in BACKGROUND_COLORS)
     
     keep = []
     
@@ -134,6 +133,7 @@ def filter_boxes_segmentation(boxes, seg_img, bg_thr=0.65, camera_z = 30.0):
 
     return keep
 
+@timeit("extract_static_boxes")
 def extract_static_boxes(classid_mask, class_id, min_area=80):
     """Find connected components of `class_id` in `classid_mask` and return boxes (x1,y1,x2,y2).
 
@@ -161,7 +161,7 @@ def extract_static_boxes(classid_mask, class_id, min_area=80):
         ymax = min(image_h - 1, int(y + h))
         boxes.append((xmin, ymin, xmax, ymax))
     return boxes
-
+@timeit("iou")
 def iou(boxA, boxB):
     """Compute Intersection over Union (IoU) between two axis-aligned boxes.
 
@@ -203,28 +203,25 @@ def iou(boxA, boxB):
 
     # Return IoU, handling division by zero
     return inter / union if union > 0 else 0.0
-
-def suppress_contained_boxes(boxes, iou_threshold=0.6):
+@timeit("suppress_contained_boxes")
+def suppress_contained_boxes(boxes, overlap_threshold=0.75):
     """
-    Remove small boxes that are mostly contained inside a larger box.
-    Uses stricter threshold for small vehicles (motorcycle/bicycle/rider).
+    Remove only obvious duplicate boxes:
+    a smaller box must be heavily contained inside a larger one.
+    This avoids deleting nearby real vehicles on curves.
     """
     if len(boxes) == 0:
         return boxes
-
-    # Small vehicle class IDs (rider, motorcycle, bicycle)
-    SMALL_VEHICLE_IDS = {13, 18, 19}
 
     boxes_sorted = sorted(boxes, key=lambda b: (b[2]-b[0]) * (b[3]-b[1]), reverse=True)
     keep = []
 
     for box_a in boxes_sorted:
         x1a, y1a, x2a, y2a, cid_a = box_a
-        area_a = (x2a - x1a) * (y2a - y1a)
+        area_a = max(1, (x2a - x1a) * (y2a - y1a))
+        cx_a = (x1a + x2a) / 2.0
+        cy_a = (y1a + y2a) / 2.0
         suppressed = False
-
-        # Use stricter threshold for small vehicles
-        threshold = 0.1 if cid_a in SMALL_VEHICLE_IDS else iou_threshold
 
         for box_b in keep:
             x1b, y1b, x2b, y2b, cid_b = box_b
@@ -238,9 +235,12 @@ def suppress_contained_boxes(boxes, iou_threshold=0.6):
                 continue
 
             inter_area = (ix2 - ix1) * (iy2 - iy1)
-            overlap_ratio = inter_area / area_a if area_a > 0 else 0
+            overlap_ratio = inter_area / area_a
 
-            if overlap_ratio > threshold:
+            center_inside = (x1b <= cx_a <= x2b) and (y1b <= cy_a <= y2b)
+
+            # suppress only if box_a is really just a duplicate fragment
+            if overlap_ratio >= overlap_threshold and center_inside:
                 suppressed = True
                 break
 
@@ -248,6 +248,7 @@ def suppress_contained_boxes(boxes, iou_threshold=0.6):
             keep.append(box_a)
 
     return keep
+@timeit("nms_boxes")
 def nms_boxes(boxes, iou_threshold=0.35):
     """
     IoU-based NMS across ALL boxes (dynamic + static combined).
@@ -268,7 +269,9 @@ def nms_boxes(boxes, iou_threshold=0.35):
 
         for box_b in keep:
             x1b, y1b, x2b, y2b, cid_b = box_b
-
+                # Fast reject for clearly separate boxes
+            if x2a <= x1b or x2b <= x1a or y2a <= y1b or y2b <= y1a:
+                continue
             # Compute IoU
             ix1 = max(x1a, x1b)
             iy1 = max(y1a, y1b)
@@ -318,3 +321,106 @@ def bg_thr_for_class(cid, camera_z):
     # Apply scale proportionally to base, cap at 0.95 to never block everything
     dynamic_thr = min(0.95, base + base * scale)
     return dynamic_thr
+
+
+def _interval_overlap(a1, a2, b1, b2):
+    return max(0, min(a2, b2) - max(a1, b1))
+
+
+def _interval_gap(a1, a2, b1, b2):
+    return max(0, max(a1, b1) - min(a2, b2))
+
+
+def _box_fill_ratio(classid_mask, box, class_id):
+    x1, y1, x2, y2 = box
+    roi = classid_mask[y1:y2, x1:x2]
+    if roi.size == 0:
+        return 0.0
+    return float(np.mean(roi == class_id))
+
+@timeit("merge_fragmented_static_boxes")
+def merge_fragmented_static_boxes(classid_mask, boxes, class_id):
+    """
+    Merge same-class static boxes that were split by thin occluders
+    like poles or trees.
+    """
+    if len(boxes) < 2:
+        return boxes
+
+    if class_id in (18, 19):
+        max_gap = 6
+        min_axis_overlap = 0.45
+        min_fill_ratio = 0.12
+        max_area_growth = 2.2
+    else:
+        max_gap = 12
+        min_axis_overlap = 0.60
+        min_fill_ratio = 0.18
+        max_area_growth = 2.6
+
+    merged_boxes = sorted(boxes, key=lambda b: (b[0], b[1]))
+    changed = True
+
+    while changed:
+        changed = False
+        next_boxes = []
+        used = [False] * len(merged_boxes)
+
+        for i, box_a in enumerate(merged_boxes):
+            if used[i]:
+                continue
+
+            current = box_a #x_min, y_min, x_max, y_max
+            # ( x_max - x_min ) * (y_max - y_min) 
+            area_a = max(1, (current[2] - current[0]) * (current[3] - current[1]))
+
+            for j in range(i + 1, len(merged_boxes)):
+                if used[j]:
+                    continue
+
+                box_b = merged_boxes[j]
+                area_b = max(1, (box_b[2] - box_b[0]) * (box_b[3] - box_b[1]))
+
+                x_overlap = _interval_overlap(current[0], current[2], box_b[0], box_b[2])
+                y_overlap = _interval_overlap(current[1], current[3], box_b[1], box_b[3])
+                x_gap = _interval_gap(current[0], current[2], box_b[0], box_b[2])
+                y_gap = _interval_gap(current[1], current[3], box_b[1], box_b[3])
+
+                aligned_horizontally = (
+                    x_gap <= max_gap and
+                    y_overlap / max(1, min(current[3] - current[1], box_b[3] - box_b[1])) >= min_axis_overlap
+                )
+                aligned_vertically = (
+                    y_gap <= max_gap and
+                    x_overlap / max(1, min(current[2] - current[0], box_b[2] - box_b[0])) >= min_axis_overlap
+                )
+
+                if not (aligned_horizontally or aligned_vertically):
+                    continue
+
+                candidate = (
+                    min(current[0], box_b[0]),
+                    min(current[1], box_b[1]),
+                    max(current[2], box_b[2]),
+                    max(current[3], box_b[3]),
+                )
+
+                candidate_area = max(1, (candidate[2] - candidate[0]) * (candidate[3] - candidate[1]))
+                fill_ratio = _box_fill_ratio(classid_mask, candidate, class_id)
+
+                if fill_ratio < min_fill_ratio:
+                    continue
+                if candidate_area > (area_a + area_b) * max_area_growth:
+                    continue
+
+                current = candidate
+                area_a = candidate_area
+                used[j] = True
+                changed = True
+
+            used[i] = True
+            next_boxes.append(current)
+
+        merged_boxes = sorted(next_boxes, key=lambda b: (b[0], b[1]))
+
+    return merged_boxes

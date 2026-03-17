@@ -85,3 +85,4 @@ def print_camera_specs(fov_horizontal_deg, image_width, image_height, altitude_m
     print(f"  Total area:          {area_m2:.2f} m²")
     
     print("\n" + "="*70 + "\n")
+

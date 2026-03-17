@@ -10,11 +10,11 @@ camera:
   width: 1280
   height: 720
   fov: 80
-  z: 60.0
+  z: 70.0
   pitch: -90.0
 
 run:
-  duration: 35
+  duration: 30
   cam_index: 45
 
 traffic:
@@ -30,7 +30,7 @@ export:
   export_interval: 4
   export_start_frame: 30
   export_end_percent: 0.95
-  spawn_change_interval: 20
+  spawn_change_interval: 8
   weather_change_interval: 4
-  max_exports: 200
+  max_exports: 100
 
