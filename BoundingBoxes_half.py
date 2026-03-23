@@ -23,9 +23,32 @@ from timing import create_io_executor, submit_image_write, submit_xml_write, wai
 cfg = bbox_config.load_config("config.yaml")
 # Create fresh output directories for images, labels, and videos
 bbox_config.setup_output_dirs()
+#  PERFORMANCE & EXPORT SETTINGS 
+
+# Enable exporting annotated frames to disk
+ENABLE_EXPORTS = cfg["export"]["enable"]
+# Export every Nth frame within the export window
+EXPORT_INTERVAL = cfg["export"]["export_interval"]
+# Start exporting after initial frames to allow scene stabilization
+EXPORT_START_FRAME = cfg["export"]["export_start_frame"]
+# Stop exporting before simulation ends (95% of total frames)
+EXPORT_END_PERCENT = cfg["export"]["export_end_percent"]
+# Maximum number of frames to export
+MAX_EXPORTS = cfg["export"]["max_exports"]
+# Changing spawn points and weather every N frames for dataset diversity
+SPAWN_CHANGE_INTERVAL = cfg["export"]["spawn_change_interval"]
+WEATHER_CHANGE_INTERVAL = cfg["export"]["weather_change_interval"]
+# Displaying Live Pygame window or not
+DISPLAY_ENABLE = cfg["display"]["enable"]
+
+#Pitch Range
+pitch_min = cfg["camera"]["pitch_min"]
+pitch_max = cfg["camera"]["pitch_max"]
+camera_pitch = random.uniform(pitch_min,pitch_max)
 
 # Initialize Pygame for visualization window
-pygame.init()
+if DISPLAY_ENABLE:
+    pygame.init()
 
 #  CARLA CONNECTION & WORLD SETUP 
 # Connect to CARLA simulator and get the world instance
@@ -65,7 +88,7 @@ if cam_index >= len(camera_spawn_points):
 base_sp = camera_spawn_points[cam_index]
 
 cam_trans = carla.Transform(carla.Location(x=base_sp.location.x, y=base_sp.location.y, z=base_sp.location.z +camera_z),
-                             carla.Rotation(pitch=cfg["camera"]["pitch"], yaw=0.0, roll=0.0))
+                             carla.Rotation(pitch=camera_pitch, yaw=0.0, roll=0.0))
 
 # Create RGB and semantic segmentation cameras with specified resolution and FOV
 image_w = cfg['camera']['width']
@@ -77,8 +100,11 @@ camera, segmentation_cam, camera_data, segmentation_data, camera_bp, semantic_bp
 
 all_sensors = [camera, segmentation_cam]
 # Create Pygame window for live visualization
-screen = pygame.display.set_mode((image_w, image_h))
-pygame.display.set_caption("CARLA view")
+screen = None
+if DISPLAY_ENABLE:
+    screen = pygame.display.set_mode((image_w, image_h))
+    pygame.display.set_caption("CARLA view")
+
 
 raw_writer = None
 boxed_writer = None
@@ -99,22 +125,28 @@ traffic_manager.set_global_distance_to_leading_vehicle(2.0)
 traffic_manager.set_synchronous_mode(True)
 #Spawn vehicles with autopilot for dynamic scene
 vehicle_bps = bp_lib.filter('*vehicle*')
+target_vehicles = cfg["traffic"]["vehicles"]
+max_attempts = target_vehicles * 10
+attempts = 0
 spawned_vehicles = []
-for _ in range(cfg["traffic"]["vehicles"]):
+
+while len(spawned_vehicles) < target_vehicles and attempts < max_attempts:
+    attempts += 1
     sp = random.choice(original_spawn_points)
     vbp = random.choice(vehicle_bps)
-    spawned_vehicle = world.try_spawn_actor(vbp, sp)
-    if spawned_vehicle:
-        spawned_vehicle.set_autopilot(True, traffic_manager.get_port())
-        spawned_vehicles.append(spawned_vehicle)
+    vehicle = world.try_spawn_actor(vbp, sp)
+    if vehicle:
+        vehicle.set_autopilot(True, traffic_manager.get_port())
+        spawned_vehicles.append(vehicle)
         print(
             "[SPAWNED]",
-            spawned_vehicle.type_id,
+            vehicle.type_id,
             "semantic_tags =",
-            spawned_vehicle.semantic_tags
-        )
+            vehicle.semantic_tags
+        )        
 
-print(f"[TRAFFIC] Spawned {len(spawned_vehicles)} vehicles")
+print(f"[TRAFFIC] Requested {target_vehicles}, spawned {len(spawned_vehicles)} vehicles")
+
 
 # Spawn pedestrian walkers with AI controllers for realistic movement
 walker_bps = bp_lib.filter('*walker*')
@@ -158,22 +190,6 @@ for ctrl in walker_controllers:
 
 print(f"[TRAFFIC] {len(spawned_walkers)} walkers | {len(walker_controllers)} controllers ready")
 
-#  PERFORMANCE & EXPORT SETTINGS 
-
-# Enable exporting annotated frames to disk
-ENABLE_EXPORTS = cfg["export"]["enable"]
-# Export every Nth frame within the export window
-EXPORT_INTERVAL = cfg["export"]["export_interval"]
-# Start exporting after initial frames to allow scene stabilization
-EXPORT_START_FRAME = cfg["export"]["export_start_frame"]
-# Stop exporting before simulation ends (95% of total frames)
-EXPORT_END_PERCENT = cfg["export"]["export_end_percent"]
-# Maximum number of frames to export
-MAX_EXPORTS = cfg["export"]["max_exports"]
-# Changing spawn points and weather every N frames for dataset diversity
-SPAWN_CHANGE_INTERVAL = cfg["export"]["spawn_change_interval"]
-WEATHER_CHANGE_INTERVAL = cfg["export"]["weather_change_interval"]
-
 #  STATE TRACKING VARIABLES 
 export_count = 0     # Counter for exported frames
 timeout_count = 0    # Counter for frame synchronization timeouts
@@ -184,6 +200,7 @@ start_time = time.time()
 frame_count = 0
 weather_idx = 0
 boxes_xyxy_cls = []
+
 # Calculate target frame count based on requested duration
 duration = cfg["run"]["duration"]
 target_frames = int(duration / world.get_settings().fixed_delta_seconds)
@@ -294,13 +311,6 @@ try:
 
         # We erase ALL spawned actors from static mask, even occluded ones
         # This prevents dynamic vehicles from being detected as static when occluded
-
-        # Determine if this frame should be exported based on settings
-        # is_export_frame = (ENABLE_EXPORTS and 
-        #                   frame_count >= EXPORT_START_FRAME and 
-        #                   frame_count <= EXPORT_END_FRAME and
-        #                   frame_count % EXPORT_INTERVAL == 0 and
-        #                   export_count < MAX_EXPORTS and len(dynamic_boxes_xyxy_cls) > 0)
 
         # Determine if this frame is eligible for export processing
         should_process_static = (
@@ -440,7 +450,7 @@ try:
                 submit_image_write(io_executor, pending_writes, cv2, img_path, img_bgr)
                 submit_image_write(io_executor, pending_writes, cv2, seg_path, seg_bgr)
                 submit_image_write(io_executor, pending_writes, cv2, classid_path, classid_mask)
-                submit_image_write(io_executor, pending_writes, cv2, static_seg_path, static_seg_bgr)
+                #submit_image_write(io_executor, pending_writes, cv2, static_seg_path, static_seg_bgr)
                 submit_image_write(io_executor, pending_writes, cv2, boxed_path, overlay)
                 submit_xml_write(
                     io_executor,
@@ -478,10 +488,16 @@ try:
 
         #  PYGAME VISUALIZATION 
         # Display current frame in Pygame window
-        rgb = img_bgr[:, :, ::-1]
-        surf = pygame.surfarray.make_surface(rgb.swapaxes(0, 1))
-        screen.blit(surf, (0, 0))
-        pygame.display.flip()
+        # rgb = img_bgr[:, :, ::-1]
+        # surf = pygame.surfarray.make_surface(rgb.swapaxes(0, 1))
+        # screen.blit(surf, (0, 0))
+        # pygame.display.flip()
+        if DISPLAY_ENABLE:
+            rgb = img_bgr[:, :, ::-1]
+            surf = pygame.surfarray.make_surface(rgb.swapaxes(0, 1))
+            screen.blit(surf, (0, 0))
+            pygame.display.flip()
+
     
         #  PERFORMANCE REPORTING 
         # Periodically report FPS and statistics
@@ -494,39 +510,46 @@ try:
         #  USER INPUT HANDLING 
         # Check for quit events
         quit_now = False
-        for event in pygame.event.get():
-            if event.type == pygame.QUIT:
-                quit_now = True
-            elif event.type == pygame.KEYDOWN:
-                if event.key == pygame.K_q:
+        if DISPLAY_ENABLE:
+            for event in pygame.event.get():
+                if event.type == pygame.QUIT:
                     quit_now = True
+                elif event.type == pygame.KEYDOWN:
+                    if event.key == pygame.K_q:
+                        quit_now = True
 
         if quit_now:
             raise KeyboardInterrupt
 
-        keys = pygame.key.get_pressed()
+        keys = pygame.key.get_pressed() if DISPLAY_ENABLE else None
+
 
         #  WEATHER CONTROL 
         # Use bracket keys to cycle through weather presets
-        if keys[pygame.K_LEFTBRACKET]:
+        if DISPLAY_ENABLE and keys[pygame.K_LEFTBRACKET]:
             weather_idx = (weather_idx - 1) % len(bbox_config.weather_presets)
             world.set_weather(bbox_config.weather_presets[weather_idx])
-        elif keys[pygame.K_RIGHTBRACKET]:
+        elif DISPLAY_ENABLE and keys[pygame.K_RIGHTBRACKET]:
             weather_idx = (weather_idx + 1) % len(bbox_config.weather_presets)
             world.set_weather(bbox_config.weather_presets[weather_idx])
         
+        if frame_count > 0 and frame_count % WEATHER_CHANGE_INTERVAL == 0 and WEATHER_CHANGE_INTERVAL > 0:
+            print(f"[AUTO CHANGE WEATHER] Frame {frame_count} — changing weather...")
+            world.set_weather(random.choice(bbox_config.weather_presets))
+
         #  CAMERA REPOSITIONING 
         # Press 'C' key to move cameras to a random spawn point
-        if keys[pygame.K_c]:
+        if  DISPLAY_ENABLE and keys[pygame.K_c]:
             print("Repositioning cameras...")
             all_sensors = bbox_carla.safe_destroy_cameras(camera, segmentation_cam, all_sensors)
             world.tick()
 
-            new_sp = random.choice(camera_spawn_points)     # ← augmented only
+            new_sp = random.choice(camera_spawn_points)     # augmented only
+            camera_pitch = random.uniform(pitch_min, pitch_max)
             new_cam_trans = carla.Transform(
                 carla.Location(x=new_sp.location.x, y=new_sp.location.y,
                                z=new_sp.location.z + camera_z),
-                carla.Rotation(pitch=cfg["camera"]["pitch"], yaw=0.0, roll=0.0)
+                carla.Rotation(pitch=camera_pitch, yaw=0.0, roll=0.0)
             )
             camera, segmentation_cam, camera_data, segmentation_data, _, _ = \
                 bbox_camera.create_cameras(world, bp_lib, new_cam_trans,
@@ -541,11 +564,12 @@ try:
             all_sensors = bbox_carla.safe_destroy_cameras(camera, segmentation_cam, all_sensors)
             world.tick()
 
-            new_sp = random.choice(camera_spawn_points)     # ← augmented only
+            new_sp = random.choice(camera_spawn_points)     #  augmented only
+            camera_pitch = random.uniform(pitch_min, pitch_max)
             new_cam_trans = carla.Transform(
                 carla.Location(x=new_sp.location.x, y=new_sp.location.y,
                                z=new_sp.location.z + camera_z),
-                carla.Rotation(pitch=cfg["camera"]["pitch"], yaw=0.0, roll=0.0)
+                carla.Rotation(pitch=camera_pitch, yaw=0.0, roll=0.0)
             )
             camera, segmentation_cam, camera_data, segmentation_data, _, _ = \
                 bbox_camera.create_cameras(world, bp_lib, new_cam_trans,
@@ -565,7 +589,7 @@ try:
     print(f"Exported {export_count} frames to {bbox_config.IMG_DIR} and {bbox_config.VOC_DIR}")
     print(f"Sync timeouts: {timeout_count} ({100*timeout_count/frame_count:.1f}%)")
     print(f"{'='*60}")
-
+    print(f"Weather presets: {len(bbox_config.weather_presets)}")
 except KeyboardInterrupt:
     #  INTERRUPTED SHUTDOWN 
     # User manually stopped the simulation
@@ -592,5 +616,6 @@ finally:
     #bbox_carla.cleanup_actors(client, world, sensors=[camera, segmentation_cam])
     bbox_carla.cleanup_actors(client, world, sensors=all_sensors)
     # Close Pygame window
-    pygame.quit()
+    if DISPLAY_ENABLE:
+        pygame.quit()
     print("Shutdown complete.")
