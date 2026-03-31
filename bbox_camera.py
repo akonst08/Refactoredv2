@@ -3,8 +3,8 @@ import numpy as np
 
 # Callback to process RGB camera images
 def cam_callback(image, data_dict):
-    # Convert raw image data to numpy array (BGRA format)
-    arr = np.frombuffer(image.raw_data, dtype=np.uint8)
+    # Copy the BGRA buffer so later CARLA updates cannot corrupt saved frames
+    arr = np.frombuffer(image.raw_data, dtype=np.uint8).copy()
     data_dict['image'] = arr.reshape((image.height, image.width, 4))
     data_dict['frame'] = image.frame
 

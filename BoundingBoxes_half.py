@@ -38,6 +38,7 @@ MAX_EXPORTS = cfg["export"]["max_exports"]
 # Changing spawn points and weather every N frames for dataset diversity
 SPAWN_CHANGE_INTERVAL = cfg["export"]["spawn_change_interval"]
 WEATHER_CHANGE_INTERVAL = cfg["export"]["weather_change_interval"]
+STABILIZATION_FRAMES = cfg["export"].get("stabilization_frames", 0)
 # Displaying Live Pygame window or not
 DISPLAY_ENABLE = cfg["display"]["enable"]
 
@@ -82,6 +83,8 @@ print(f"[SPAWN POINTS] Total available pedestrian positions: {len(original_spawn
 # Position camera at specified spawn point but elevated (z=60) with top-down view (pitch=-90)
 cam_index = cfg["run"]["cam_index"]
 camera_z = cfg["camera"]["z"]
+camera_z_min = cfg["camera"].get("z_min", 50.0)
+camera_z_max = cfg["camera"].get("z_max", 80.0)
 if cam_index >= len(camera_spawn_points):
     raise ValueError(f"cam_index {cam_index} out of range (map has {len(camera_spawn_points)} spawn points)")
 
@@ -119,7 +122,7 @@ K = bbox_detection.build_projection_matrix(image_w, image_h, cfg["camera"]["fov"
 #  TRAFFIC SPAWNING 
 # Add this block right after the vehicle spawning loop (after line 105):
 traffic_manager = client.get_trafficmanager()
-traffic_manager.set_global_distance_to_leading_vehicle(2.0)
+traffic_manager.set_global_distance_to_leading_vehicle(4.0)
 
 # THIS is the key line — stops TM from spawning its own vehicles
 traffic_manager.set_synchronous_mode(True)
@@ -136,7 +139,6 @@ while len(spawned_vehicles) < target_vehicles and attempts < max_attempts:
     vbp = random.choice(vehicle_bps)
     vehicle = world.try_spawn_actor(vbp, sp)
     if vehicle:
-        vehicle.set_autopilot(True, traffic_manager.get_port())
         spawned_vehicles.append(vehicle)
         print(
             "[SPAWNED]",
@@ -144,6 +146,11 @@ while len(spawned_vehicles) < target_vehicles and attempts < max_attempts:
             "semantic_tags =",
             vehicle.semantic_tags
         )        
+
+world.tick()
+
+for vehicle in spawned_vehicles:
+    vehicle.set_autopilot(True, traffic_manager.get_port())
 
 print(f"[TRAFFIC] Requested {target_vehicles}, spawned {len(spawned_vehicles)} vehicles")
 
@@ -154,9 +161,20 @@ ctrl_bp = bp_lib.find('controller.ai.walker')
 
 spawned_walkers = []
 walker_controllers = []
+target_walkers = cfg["traffic"]["walkers"]
+
+attempts = 0
+max_attempts = target_walkers * 10
+
+controller_attempts = 0
+max_controller_attempts = target_walkers * 10
+
+start_attempts = 0
+max_start_attempts = target_walkers * 10
 
 # Step 1: Spawn ALL walkers first
-for _ in range(cfg["traffic"]["walkers"]):
+while len(spawned_walkers) < target_walkers and attempts < max_attempts:
+    attempts += 1
     sp = carla.Transform()
     sp.location = world.get_random_location_from_navigation()
     if sp.location:
@@ -169,26 +187,50 @@ for _ in range(cfg["traffic"]["walkers"]):
 world.tick()
 
 # Step 3: Attach AI controller to each walker
-for walker in spawned_walkers:
+walker_index = 0
+valid_walkers = []
+while walker_index < len(spawned_walkers) and len(walker_controllers) < target_walkers and controller_attempts < max_controller_attempts:
+    controller_attempts += 1
+    walker = spawned_walkers[walker_index]
     try:
         ctrl = world.spawn_actor(ctrl_bp, carla.Transform(), attach_to=walker)
         walker_controllers.append(ctrl)
+        valid_walkers.append(walker)
     except Exception as e:
         print(f"[WARN] Controller attach failed: {e}")
+    walker_index += 1
+
+spawned_walkers = valid_walkers
 
 # Step 4: Tick once so all controllers are registered
 world.tick()
 
 # Step 5: Start all controllers
-for ctrl in walker_controllers:
+ctrl_index = 0
+ready_walkers = []
+ready_controllers = []
+
+while ctrl_index < len(walker_controllers) and start_attempts < max_start_attempts:
+    start_attempts += 1
+    ctrl = walker_controllers[ctrl_index]
+    walker = spawned_walkers[ctrl_index]
     try:
-        ctrl.start()
-        ctrl.go_to_location(world.get_random_location_from_navigation())
-        ctrl.set_max_speed(1 + random.random())
+        target_loc = world.get_random_location_from_navigation()
+        if target_loc:
+            ctrl.start()
+            ctrl.go_to_location(target_loc)
+            ctrl.set_max_speed(1 + random.random())
+            ready_walkers.append(walker)
+            ready_controllers.append(ctrl)
     except RuntimeError as e:
         print(f"[WARN] ctrl.start() failed (skipping): {e}")
+    ctrl_index += 1
+
+spawned_walkers = ready_walkers
+walker_controllers = ready_controllers
 
 print(f"[TRAFFIC] {len(spawned_walkers)} walkers | {len(walker_controllers)} controllers ready")
+
 
 #  STATE TRACKING VARIABLES 
 export_count = 0     # Counter for exported frames
@@ -200,6 +242,8 @@ start_time = time.time()
 frame_count = 0
 weather_idx = 0
 boxes_xyxy_cls = []
+exported_this_spawn = False
+next_export_allowed_frame = EXPORT_START_FRAME
 
 # Calculate target frame count based on requested duration
 duration = cfg["run"]["duration"]
@@ -209,7 +253,6 @@ kernel_erode = np.ones((2, 2), np.uint8)   # Small erosion to separate
 kernel_dilate = np.ones((3, 3), np.uint8)  # Slightly larger dilation to restore size
 kernel_close = np.ones((3, 3), np.uint8)
 kernel_car = np.ones((5, 5), np.uint8)
-actors = world.get_actors()
 
 
 try:
@@ -245,6 +288,8 @@ try:
             w2c = np.array(cam_tf.get_inverse_matrix())
         except AttributeError:
             w2c = np.linalg.inv(np.array(cam_tf.get_matrix(), dtype=float))
+
+        actors = world.get_actors()
 
         #  DYNAMIC ACTOR DETECTION 
         # Project 3D bounding boxes of all vehicles and walkers onto 2D image plane
@@ -313,18 +358,20 @@ try:
         # This prevents dynamic vehicles from being detected as static when occluded
 
         # Determine if this frame is eligible for export processing
-        should_process_static = (
+        can_export_this_frame = (
             ENABLE_EXPORTS and
             frame_count >= EXPORT_START_FRAME and
             frame_count <= EXPORT_END_FRAME and
             frame_count % EXPORT_INTERVAL == 0 and
-            export_count < MAX_EXPORTS
+            export_count < MAX_EXPORTS and
+            not exported_this_spawn and
+            frame_count >= next_export_allowed_frame
         )
  
         
         #  FRAME EXPORT 
         # Save frame and annotations if this is an export frame
-        if should_process_static:
+        if can_export_this_frame:
             
             frame_id = f"{frame_count:06d}"
             img_bgr = img[:, :, :3]
@@ -439,8 +486,10 @@ try:
                     # DEBUG SHOWS IDS AND PIXEL COUNTS
                     #print(dict(zip(ids, counts)))
 
+                boxes_for_export = list(boxes_xyxy_cls)
+
                 overlay = img_bgr.copy()
-                for (x1, y1, x2, y2, cid) in boxes_xyxy_cls:
+                for (x1, y1, x2, y2, cid) in boxes_for_export:
                     color = bbox_config.CLASS_COLORS.get(cid, bbox_config.DEFAULT_COLOR)
                     cv2.rectangle(overlay, (x1, y1), (x2, y2), color, 1)
 
@@ -457,7 +506,7 @@ try:
                     pending_writes,
                     bbox_labels.write_voc_xml,
                     voc_path,
-                    boxes_xyxy_cls,
+                    boxes_for_export,
                     image_w,
                     image_h,
                     img_path,
@@ -465,6 +514,7 @@ try:
                 )
 
                 export_count += 1
+                exported_this_spawn = True
                 print(f"[EXPORT {export_count}/{MAX_EXPORTS}] Frame {frame_count}: {len(boxes_xyxy_cls)} boxes")
             
 
@@ -533,7 +583,7 @@ try:
             weather_idx = (weather_idx + 1) % len(bbox_config.weather_presets)
             world.set_weather(bbox_config.weather_presets[weather_idx])
         
-        if frame_count > 0 and frame_count % WEATHER_CHANGE_INTERVAL == 0 and WEATHER_CHANGE_INTERVAL > 0:
+        if WEATHER_CHANGE_INTERVAL > 0 and frame_count > 0 and frame_count % WEATHER_CHANGE_INTERVAL == 0:
             print(f"[AUTO CHANGE WEATHER] Frame {frame_count} — changing weather...")
             world.set_weather(random.choice(bbox_config.weather_presets))
 
@@ -546,6 +596,7 @@ try:
 
             new_sp = random.choice(camera_spawn_points)     # augmented only
             camera_pitch = random.uniform(pitch_min, pitch_max)
+            camera_z = random.uniform(camera_z_min, camera_z_max)
             new_cam_trans = carla.Transform(
                 carla.Location(x=new_sp.location.x, y=new_sp.location.y,
                                z=new_sp.location.z + camera_z),
@@ -555,26 +606,29 @@ try:
                 bbox_camera.create_cameras(world, bp_lib, new_cam_trans,
                                            cfg["camera"]["fov"], image_w, image_h)
             all_sensors.extend([camera, segmentation_cam])
+            exported_this_spawn = False
+            next_export_allowed_frame = frame_count + STABILIZATION_FRAMES + 1
             world.tick()
             print("[Reposition] Camera moved.")
 
         #  AUTO CAMERA REPOSITIONING 
         if SPAWN_CHANGE_INTERVAL > 0 and frame_count > 0 and frame_count % SPAWN_CHANGE_INTERVAL == 0:
             print(f"[AUTO REPOSITION] Frame {frame_count} — moving camera...")
-            all_sensors = bbox_carla.safe_destroy_cameras(camera, segmentation_cam, all_sensors)
-            world.tick()
 
             new_sp = random.choice(camera_spawn_points)     #  augmented only
             camera_pitch = random.uniform(pitch_min, pitch_max)
+            camera_z = random.uniform(camera_z_min, camera_z_max)
             new_cam_trans = carla.Transform(
                 carla.Location(x=new_sp.location.x, y=new_sp.location.y,
                                z=new_sp.location.z + camera_z),
                 carla.Rotation(pitch=camera_pitch, yaw=0.0, roll=0.0)
             )
-            camera, segmentation_cam, camera_data, segmentation_data, _, _ = \
-                bbox_camera.create_cameras(world, bp_lib, new_cam_trans,
-                                           cfg["camera"]["fov"], image_w, image_h)
-            all_sensors.extend([camera, segmentation_cam])
+            camera.set_transform(new_cam_trans)
+            segmentation_cam.set_transform(new_cam_trans)
+            
+            exported_this_spawn = False
+            next_export_allowed_frame = frame_count + STABILIZATION_FRAMES + 1
+            
             world.tick()
             print("[AUTO REPOSITION] Done.")
 
